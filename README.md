@@ -47,7 +47,7 @@ No guessing. Just accurate, Rust-specific stats in seconds.
 2. A new button will appear:
 
    ```
-   [ Calculate Rust Stats ]
+   [ Get True Rust Hours ]
    ```
 
 3. Click it. The following results will appear:
