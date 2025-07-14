@@ -9,10 +9,6 @@ A Tampermonkey script for serious Rust admins and players. This tool digs into B
 
 ---
 
-![Screenshot 1](https://i.imgur.com/VOd2K9k.png)
----
-![Screenshot 2](https://i.imgur.com/kFekEq1.png)
-
 ## 🔍 The Problem
 
 You check a player’s Steam profile and see "Time Played: 6,000 hours." Impressive... or is it?
@@ -31,6 +27,9 @@ This script adds a single button to every BattleMetrics player profile. When cli
 
 No guessing. Just accurate, Rust-specific stats in seconds.
 
+![Screenshot 1](https://i.imgur.com/VOd2K9k.png)
+
+![Screenshot 2](https://i.imgur.com/kFekEq1.png)
 ---
 
 ## ⚙️ Features
