@@ -15,7 +15,7 @@ You check a player’s Steam profile and see "Time Played: 6,000 hours." Impress
 
 They could’ve spent 6,000 of those hours AFK in the menu. This script shows you the players True Rust Hours
 
-(Or if you're using BattleMetrics and want to see a player's total Rust hours without manually adding up each server's time.)
+(Or if you're using BattleMetrics and want to see a player's total Rust hours without manually adding up each server's time.
 ---
 
 ## ✅ The Solution
