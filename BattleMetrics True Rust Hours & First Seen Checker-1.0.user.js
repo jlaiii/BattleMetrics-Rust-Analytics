@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         True Rust Hours & First Seen Checker
+// @name         True Rust Hours & First Seen Checker with Dynamic Top Servers Width
 // @namespace    http://tampermonkey.net/
 // @version      1.0
-// @description  Instantly shows a Rust player's true in-game hours and the date they were first seen playing Rust (via BattleMetrics).
+// @description  Shows true Rust hours, first seen date, and top 10 servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/players/*
 // @grant        none
@@ -14,30 +14,37 @@
 
     const HOURS_RESULT_ID = 'bmt-hour-result';
     const FIRST_SEEN_RESULT_ID = 'bmt-first-seen-result';
+    const TOP_SERVERS_CONTAINER_ID = 'bmt-top-servers-container';
+    const TOP_SERVERS_TOGGLE_ID = 'bmt-top-servers-toggle';
     const BUTTON_ID = 'bmt-hour-button';
     const RELOAD_FLAG = 'bmt_force_recalc_after_load';
 
     const removeResults = () => {
-        const existingHours = document.getElementById(HOURS_RESULT_ID);
-        if (existingHours) existingHours.remove();
-        const existingFirstSeen = document.getElementById(FIRST_SEEN_RESULT_ID);
-        if (existingFirstSeen) existingFirstSeen.remove();
+        const idsToRemove = [HOURS_RESULT_ID, FIRST_SEEN_RESULT_ID, TOP_SERVERS_CONTAINER_ID, TOP_SERVERS_TOGGLE_ID];
+        idsToRemove.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        });
     };
 
     const showHoursResult = (message, isError = false) => {
         const div = document.createElement("div");
         div.id = HOURS_RESULT_ID;
         div.textContent = message;
-        div.style.position = "fixed";
-        div.style.top = "60px";
-        div.style.right = "20px";
-        div.style.backgroundColor = isError ? "#dc3545" : "#28a745";
-        div.style.color = "#fff";
-        div.style.padding = "10px 20px";
-        div.style.borderRadius = "5px";
-        div.style.zIndex = "9999";
-        div.style.fontWeight = "bold";
-        div.style.fontSize = "16px";
+        Object.assign(div.style, {
+            position: "fixed",
+            top: "60px",
+            right: "20px",
+            backgroundColor: isError ? "#dc3545" : "#28a745",
+            color: "#fff",
+            padding: "10px 20px",
+            borderRadius: "5px",
+            zIndex: "9999",
+            fontWeight: "bold",
+            fontSize: "16px",
+            maxWidth: "400px",
+            wordWrap: "break-word",
+        });
         document.body.appendChild(div);
     };
 
@@ -46,21 +53,137 @@
         div.id = FIRST_SEEN_RESULT_ID;
         const timeElement = document.createElement("time");
         timeElement.textContent = message;
-        if (title) {
-            timeElement.title = title;
-        }
+        if (title) timeElement.title = title;
         div.appendChild(timeElement);
-        div.style.position = "fixed";
-        div.style.top = "115px";
-        div.style.right = "20px";
-        div.style.backgroundColor = isError ? "#dc3545" : "#007bff";
-        div.style.color = "#fff";
-        div.style.padding = "8px 15px";
-        div.style.borderRadius = "5px";
-        div.style.zIndex = "9998";
-        div.style.fontWeight = "normal";
-        div.style.fontSize = "14px";
+        Object.assign(div.style, {
+            position: "fixed",
+            top: "110px",
+            right: "20px",
+            backgroundColor: isError ? "#dc3545" : "#007bff",
+            color: "#fff",
+            padding: "8px 15px",
+            borderRadius: "5px",
+            zIndex: "9998",
+            fontWeight: "normal",
+            fontSize: "14px",
+            maxWidth: "400px",
+            wordWrap: "break-word",
+        });
         document.body.appendChild(div);
+    };
+
+    const createToggleButton = () => {
+        if (document.getElementById(TOP_SERVERS_TOGGLE_ID)) return;
+        const btn = document.createElement("button");
+        btn.id = TOP_SERVERS_TOGGLE_ID;
+        btn.textContent = "Show Top 10 Servers ▼";
+        Object.assign(btn.style, {
+            position: "fixed",
+            top: "155px",
+            right: "20px",
+            zIndex: "10000",
+            padding: "8px 15px",
+            backgroundColor: "#17a2b8",
+            color: "#fff",
+            border: "none",
+            borderRadius: "5px",
+            cursor: "pointer",
+            whiteSpace: "nowrap",
+            fontSize: "14px",
+            fontWeight: "bold",
+        });
+        btn.onclick = () => {
+            const container = document.getElementById(TOP_SERVERS_CONTAINER_ID);
+            if (!container) return;
+            if (container.style.display === "none") {
+                container.style.display = "block";
+                btn.textContent = "Hide Top 10 Servers ▲";
+            } else {
+                container.style.display = "none";
+                btn.textContent = "Show Top 10 Servers ▼";
+            }
+        };
+        document.body.appendChild(btn);
+    };
+
+    // Measure text width helper (uses a canvas context)
+    const measureTextWidth = (text, font) => {
+        const canvas = measureTextWidth.canvas || (measureTextWidth.canvas = document.createElement("canvas"));
+        const context = canvas.getContext("2d");
+        context.font = font;
+        return context.measureText(text).width;
+    };
+
+    const showTopServersResult = (servers) => {
+        removeTopServers(); // clear existing container if any
+
+        const container = document.createElement("div");
+        container.id = TOP_SERVERS_CONTAINER_ID;
+
+        // Choose monospace font for accurate width measurement
+        const fontStyle = "14px 'Courier New', Courier, monospace";
+
+        // Calculate max text width of server lines (name + ' — ' + hours + ' hrs')
+        let maxText = "";
+        servers.forEach(({ name, hours }) => {
+            const line = `${name} — ${hours.toFixed(2)} hrs`;
+            if (line.length > maxText.length) maxText = line;
+        });
+
+        // Measure text width in pixels, add padding, min 600px, max 900px
+        let measuredWidth = measureTextWidth(maxText, fontStyle) + 60; // add some padding
+        if (measuredWidth < 600) measuredWidth = 600;
+        if (measuredWidth > 900) measuredWidth = 900;
+
+        Object.assign(container.style, {
+            position: "fixed",
+            top: "195px",
+            right: "20px",
+            backgroundColor: "#17a2b8",
+            color: "#fff",
+            padding: "15px 20px",
+            borderRadius: "5px",
+            zIndex: "9997",
+            fontWeight: "normal",
+            fontSize: "14px",
+            fontFamily: fontStyle,
+            maxHeight: "400px",
+            overflowY: "auto",
+            whiteSpace: "nowrap", // prevent wrapping
+            width: `${measuredWidth}px`,
+            boxShadow: "0 4px 10px rgba(0,0,0,0.3)",
+            display: servers.length ? "block" : "none",
+        });
+
+        if (servers.length === 0) {
+            container.textContent = "No Rust server hours found.";
+        } else {
+            const title = document.createElement("div");
+            title.textContent = "Top 10 Rust Servers by Hours:";
+            title.style.fontWeight = "bold";
+            title.style.marginBottom = "10px";
+            title.style.fontSize = "16px";
+            container.appendChild(title);
+
+            const list = document.createElement("ol");
+            list.style.paddingLeft = "20px";
+
+            servers.forEach(({ name, hours }) => {
+                const item = document.createElement("li");
+                item.style.marginBottom = "6px";
+                item.textContent = `${name} — ${hours.toFixed(2)} hrs`;
+                list.appendChild(item);
+            });
+
+            container.appendChild(list);
+        }
+
+        document.body.appendChild(container);
+    };
+
+    const removeTopServers = () => {
+        const container = document.getElementById(TOP_SERVERS_CONTAINER_ID);
+        if (container) container.remove();
     };
 
     function toRelativeTime(timestamp) {
@@ -102,19 +225,28 @@
                 if (!serverInfo) {
                     showHoursResult("True Rust Hours: 0.00");
                     showFirstSeenResult("First Time Seen on Rust: N/A");
+                    showTopServersResult([]);
+                    createToggleButton();
                 } else {
                     let totalSeconds = 0;
                     let earliestRustFirstSeen = null;
+                    const rustServersPlayed = [];
 
                     Object.values(serverInfo).forEach(playerStats => {
                         const serverId = playerStats.serverId;
                         const serverDetails = allServers[serverId];
                         if (serverDetails && serverDetails.game_id === 'rust') {
-                            totalSeconds += (playerStats.timePlayed || 0);
-                            const currentFirstSeen = playerStats.firstSeen;
-                            if (earliestRustFirstSeen === null || currentFirstSeen < earliestRustFirstSeen) {
-                                earliestRustFirstSeen = currentFirstSeen;
+                            const timePlayed = playerStats.timePlayed || 0;
+                            totalSeconds += timePlayed;
+
+                            if (earliestRustFirstSeen === null || playerStats.firstSeen < earliestRustFirstSeen) {
+                                earliestRustFirstSeen = playerStats.firstSeen;
                             }
+
+                            rustServersPlayed.push({
+                                name: serverDetails.name || "Unnamed Server",
+                                seconds: timePlayed
+                            });
                         }
                     });
 
@@ -129,6 +261,14 @@
                     } else {
                         showFirstSeenResult("First Time Seen on Rust: N/A");
                     }
+
+                    rustServersPlayed.sort((a, b) => b.seconds - a.seconds);
+                    const top10 = rustServersPlayed.slice(0, 10).map(s => ({
+                        name: s.name,
+                        hours: s.seconds / 3600
+                    }));
+                    showTopServersResult(top10);
+                    createToggleButton();
                 }
             } else {
                 sessionStorage.setItem(RELOAD_FLAG, 'true');
@@ -151,16 +291,18 @@
         btn.id = BUTTON_ID;
         btn.textContent = "Get True Rust Hours";
         btn.onclick = calculateOrReload;
-        btn.style.position = "fixed";
-        btn.style.top = "20px";
-        btn.style.right = "20px";
-        btn.style.zIndex = "9999";
-        btn.style.padding = "10px 20px";
-        btn.style.backgroundColor = "#007bff";
-        btn.style.color = "#fff";
-        btn.style.border = "none";
-        btn.style.borderRadius = "5px";
-        btn.style.cursor = "pointer";
+        Object.assign(btn.style, {
+            position: "fixed",
+            top: "20px",
+            right: "20px",
+            zIndex: "9999",
+            padding: "10px 20px",
+            backgroundColor: "#007bff",
+            color: "#fff",
+            border: "none",
+            borderRadius: "5px",
+            cursor: "pointer",
+        });
         document.body.appendChild(btn);
     };
 
