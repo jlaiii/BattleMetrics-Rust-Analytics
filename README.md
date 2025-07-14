@@ -6,6 +6,8 @@ A Tampermonkey script for serious Rust admins and players. This tool digs into B
 
 - **True total hours spent on Rust servers**
 - **The first-ever tracked appearance on a Rust server**
+![Screenshot 1](https://i.imgur.com/kFekEq1.png)
+![Screenshot 2](https://i.imgur.com/kFekEq1.png)
 
 ---
 
