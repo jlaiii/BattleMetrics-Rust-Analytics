@@ -13,7 +13,7 @@ A Tampermonkey script for serious Rust admins and players. This tool digs into B
 
 You check a player’s Steam profile and see "Time Played: 6,000 hours." Impressive... or is it?
 
-They could’ve spent 6,000 of those hours AFK in the menu. This script gives you the real numbers that matter for Rust.
+They could’ve spent 6,000 of those hours AFK in the menu. This script shows you the players True Rust Hours
 
 ---
 
