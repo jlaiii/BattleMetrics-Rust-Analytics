@@ -10,6 +10,7 @@ A Tampermonkey script for serious Rust admins and players. This tool digs into B
 ---
 
 ![Screenshot 1](https://i.imgur.com/VOd2K9k.png)
+---
 ![Screenshot 2](https://i.imgur.com/kFekEq1.png)
 
 ## 🔍 The Problem
