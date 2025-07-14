@@ -74,7 +74,7 @@ To use this script, install a user script manager like [Tampermonkey](https://ww
 2. **Install This Script**  
 
    ```
-   https://github.com/me]/[Your-Repo-Name]/raw/main/BattleMetrics%20Rust%20Stats%20Calculator.user.js
+   [https://github.com/me]/[Your-Repo-Name]/raw/main/BattleMetrics%20Rust%20Stats%20Calculator.user.js](https://github.com/jlaiii/BattleMetrics-True-Rust-Hours/raw/refs/heads/main/BattleMetrics%20True%20Rust%20Hours-1.0.user.js)
    ```
 
 3. Your script manager will ask you to confirm. Click **Install**.
