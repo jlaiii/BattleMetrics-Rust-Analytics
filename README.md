@@ -11,11 +11,13 @@ A Tampermonkey script for serious Rust admins and players. This tool digs into B
 
 ## 🔍 The Problem
 
-You check a player’s Steam profile and see "Time Played: 6,000 hours." Impressive... or is it?
+You check someone’s Steam profile and see "Time Played: 6,000 hours." Impressive… or is it?
 
-They could’ve spent 6,000 of those hours AFK in the menu. This script shows you the players True Rust Hours
+For all you know, they could’ve spent most of that time AFK in the main menu.
 
-Or if you're using BattleMetrics and want to see a player's total Rust hours without manually adding up each server's time.
+This tool gives you the real picture by checking and adding up the actual time spent playing on Rust servers.
+
+Whether you're verifying someone manually or using BattleMetrics, this script automatically totals their playtime across all servers—no more clicking and adding each one by hand.
 
 ---
 
