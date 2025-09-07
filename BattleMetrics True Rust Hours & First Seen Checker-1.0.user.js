@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         BM Rust Player Information
+// @name         BattleMetrics Rust Analytics
 // @namespace    http://tampermonkey.net/
 // @version      1.0
-// @description  Shows true Rust hours, first seen date, and top 10 servers
+// @description  analytics tool for BattleMetrics that displays comprehensive Rust player statistics including total playtime, first seen date, and server history
 // @author       jlaiii
-// @match        https://www.battlemetrics.com/players/*
+// @match        https://www.battlemetrics.com/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -183,25 +183,94 @@
         return 'a moment ago';
     }
 
-    const calculateOrReload = () => {
+    const calculateOrReload = (retryCount = 0) => {
         const button = document.getElementById(BUTTON_ID);
         if (button) {
             button.disabled = true;
-            button.textContent = "Fetching data...";
+            button.textContent = retryCount > 0 ? `Waiting for data... (${retryCount}/5)` : "Fetching data...";
         }
         removeResults();
 
-        try {
-            const urlPlayerID = window.location.pathname.split('/players/')[1].split('/')[0];
+        // Helper function to check if data is ready
+        const isDataReady = () => {
             const dataScript = document.getElementById('storeBootstrap');
-            if (!dataScript) throw new Error("Missing BattleMetrics data.");
+            if (!dataScript) return { ready: false, reason: "Missing BattleMetrics data script" };
 
-            const pageData = JSON.parse(dataScript.textContent);
-            const dataPlayerID = Object.keys(pageData.state.players.serverInfo)[0];
+            try {
+                const pageData = JSON.parse(dataScript.textContent);
+                
+                // Debug logging
+                console.log("BM Script Debug: pageData structure:", {
+                    hasState: !!pageData?.state,
+                    hasPlayers: !!pageData?.state?.players,
+                    hasServerInfo: !!pageData?.state?.players?.serverInfo,
+                    serverInfoKeys: pageData?.state?.players?.serverInfo ? Object.keys(pageData.state.players.serverInfo) : [],
+                    hasServers: !!pageData?.state?.servers,
+                    hasServersData: !!pageData?.state?.servers?.servers,
+                    currentURL: window.location.href
+                });
+                
+                if (!pageData || !pageData.state) {
+                    return { ready: false, reason: "Invalid page data structure" };
+                }
+                
+                if (!pageData.state.players || !pageData.state.players.serverInfo) {
+                    return { ready: false, reason: "Player data not available" };
+                }
+
+                const serverInfoKeys = Object.keys(pageData.state.players.serverInfo);
+                if (serverInfoKeys.length === 0) {
+                    return { ready: false, reason: "No server information found" };
+                }
+
+                if (!pageData.state.servers || !pageData.state.servers.servers) {
+                    return { ready: false, reason: "Server data not available" };
+                }
+
+                return { ready: true, pageData };
+            } catch (e) {
+                return { ready: false, reason: `Data parsing error: ${e.message}` };
+            }
+        };
+
+        const dataCheck = isDataReady();
+        
+        // If data isn't ready, retry up to 8 times (longer wait for navigation)
+        if (!dataCheck.ready) {
+            if (retryCount < 8) {
+                console.log(`BM Script: ${dataCheck.reason}, retrying in 2 seconds... (attempt ${retryCount + 1}/8)`);
+                setTimeout(() => calculateOrReload(retryCount + 1), 2000);
+                return;
+            } else {
+                // After 8 retries, try to force reload the page data
+                console.log("BM Script: Data not ready after retries, attempting page reload...");
+                sessionStorage.setItem(RELOAD_FLAG, 'true');
+                window.location.reload();
+                return;
+            }
+        }
+
+        // Data is ready, proceed with processing
+        try {
+            const urlPlayerID = window.location.pathname.split('/players/')[1]?.split('/')[0];
+            if (!urlPlayerID) throw new Error("Invalid player URL format.");
+
+            const pageData = dataCheck.pageData;
+            const serverInfoKeys = Object.keys(pageData.state.players.serverInfo);
+            
+            const dataPlayerID = serverInfoKeys[0];
 
             // Get player name for display
-            const playerData = pageData.state.players.players[urlPlayerID];
-            const playerName = playerData ? playerData.name : 'Unknown Player';
+            let playerName = 'Unknown Player';
+            if (pageData.state.players.players && pageData.state.players.players[urlPlayerID]) {
+                playerName = pageData.state.players.players[urlPlayerID].name;
+            } else {
+                // Try to get name from page title or other sources
+                const titleElement = document.querySelector('h1, .player-name, [data-testid="player-name"]');
+                if (titleElement) {
+                    playerName = titleElement.textContent.trim();
+                }
+            }
 
             // Update current player tracking
             currentPlayerID = urlPlayerID;
@@ -255,26 +324,91 @@
                     }));
 
                     showInfoBox(playerName, urlPlayerID, totalHours, firstSeenData, top10, rustServersPlayed.length);
+                    
+                    // Reset button on success
+                    if (button) {
+                        button.disabled = false;
+                        button.textContent = "Get Rust Analytics";
+                    }
                 }
             } else {
-                // Data mismatch - automatically refresh to get correct data
-                console.log("BM Script: Data mismatch detected. Auto-refreshing to load correct user data.");
-                const firstSeenData = { relative: "Loading...", full: null };
-                showInfoBox(playerName, urlPlayerID, "Loading...", firstSeenData, [], 0, false, "Loading data for current user...");
-                sessionStorage.setItem(RELOAD_FLAG, 'true');
-                setTimeout(() => {
-                    window.location.reload();
-                }, 500);
-                return;
+                // Data mismatch - wait a bit and try again, or refresh if needed
+                console.log("BM Script: Data mismatch detected. Player ID from URL:", urlPlayerID, "Data ID:", dataPlayerID);
+                
+                // Try to use the data we have anyway if it exists
+                const availableServerInfo = pageData.state.players.serverInfo[dataPlayerID];
+                if (availableServerInfo) {
+                    console.log("BM Script: Using available data for player:", dataPlayerID);
+                    const allServers = pageData.state.servers.servers;
+                    
+                    let totalSeconds = 0;
+                    let earliestRustFirstSeen = null;
+                    const rustServersPlayed = [];
+
+                    Object.values(availableServerInfo).forEach(playerStats => {
+                        const serverId = playerStats.serverId;
+                        const serverDetails = allServers[serverId];
+                        if (serverDetails && serverDetails.game_id === 'rust') {
+                            const timePlayed = playerStats.timePlayed || 0;
+                            totalSeconds += timePlayed;
+
+                            if (earliestRustFirstSeen === null || playerStats.firstSeen < earliestRustFirstSeen) {
+                                earliestRustFirstSeen = playerStats.firstSeen;
+                            }
+
+                            rustServersPlayed.push({
+                                name: serverDetails.name || "Unnamed Server",
+                                seconds: timePlayed
+                            });
+                        }
+                    });
+
+                    const totalHours = (totalSeconds / 3600).toFixed(2);
+
+                    let firstSeenData;
+                    if (earliestRustFirstSeen) {
+                        const firstSeenDate = new Date(earliestRustFirstSeen);
+                        const relativeTime = toRelativeTime(earliestRustFirstSeen);
+                        const fullDateString = firstSeenDate.toLocaleString();
+                        firstSeenData = { relative: relativeTime, full: fullDateString };
+                    } else {
+                        firstSeenData = { relative: "N/A", full: null };
+                    }
+
+                    rustServersPlayed.sort((a, b) => b.seconds - a.seconds);
+                    const top10 = rustServersPlayed.slice(0, 10).map(s => ({
+                        name: s.name,
+                        hours: s.seconds / 3600
+                    }));
+
+                    showInfoBox(playerName, urlPlayerID, totalHours, firstSeenData, top10, rustServersPlayed.length);
+                    
+                    // Reset button on success
+                    if (button) {
+                        button.disabled = false;
+                        button.textContent = "Get Rust Analytics";
+                    }
+                } else {
+                    // Last resort - refresh the page
+                    console.log("BM Script: No usable data found. Auto-refreshing to load correct user data.");
+                    const firstSeenData = { relative: "Loading...", full: null };
+                    showInfoBox(playerName, urlPlayerID, "Loading...", firstSeenData, [], 0, false, "Loading data for current user...");
+                    sessionStorage.setItem(RELOAD_FLAG, 'true');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 500);
+                    return;
+                }
             }
         } catch (e) {
             console.error("BM Script Error:", e);
             const firstSeenData = { relative: "Error", full: null };
             showInfoBox("Unknown Player", "N/A", "Error", firstSeenData, [], 0, true, e.message);
-        } finally {
+            
+            // Reset button
             if (button) {
                 button.disabled = false;
-                button.textContent = "Get True Rust Hours";
+                button.textContent = "Get Rust Analytics";
             }
         }
     };
@@ -286,7 +420,7 @@
 
         const btn = document.createElement("button");
         btn.id = BUTTON_ID;
-        btn.textContent = "Get True Rust Hours";
+        btn.textContent = "Get Rust Analytics";
         btn.onclick = calculateOrReload;
         Object.assign(btn.style, {
             position: "fixed",
@@ -303,6 +437,37 @@
         document.body.appendChild(btn);
     };
 
+    const waitForDataAndCreateButton = (attempt = 0) => {
+        const maxAttempts = 15; // Wait longer for navigation
+        
+        // Check if data is ready
+        const dataScript = document.getElementById('storeBootstrap');
+        if (dataScript) {
+            try {
+                const pageData = JSON.parse(dataScript.textContent);
+                if (pageData && pageData.state && pageData.state.players && pageData.state.players.serverInfo) {
+                    const serverInfoKeys = Object.keys(pageData.state.players.serverInfo);
+                    if (serverInfoKeys.length > 0 && pageData.state.servers && pageData.state.servers.servers) {
+                        console.log("BM Script: Data is ready, creating button");
+                        createButton();
+                        return;
+                    }
+                }
+            } catch (e) {
+                // Data not ready yet
+            }
+        }
+        
+        // If data not ready and we haven't exceeded max attempts, try again
+        if (attempt < maxAttempts) {
+            console.log(`BM Script: Waiting for data to load... (${attempt + 1}/${maxAttempts})`);
+            setTimeout(() => waitForDataAndCreateButton(attempt + 1), 1000);
+        } else {
+            console.log("BM Script: Data not ready after waiting, creating button anyway (will auto-reload when clicked)");
+            createButton();
+        }
+    };
+
     const checkForURLChange = () => {
         const currentURL = window.location.href;
         if (currentURL !== lastURL) {
@@ -310,7 +475,11 @@
             lastURL = currentURL;
             currentPlayerID = null;
             removeResults();
-            createButton();
+            
+            // Only create button on player pages, wait for data to be ready
+            if (currentURL.includes('/players/')) {
+                waitForDataAndCreateButton();
+            }
         }
     };
 
@@ -321,10 +490,26 @@
         });
 
         // Watch for content changes
-        const contentObserver = new MutationObserver(() => {
-            // Ensure button exists after content changes
-            if (!document.getElementById(BUTTON_ID)) {
-                createButton();
+        const contentObserver = new MutationObserver((mutations) => {
+            // Check if storeBootstrap script was added/modified
+            mutations.forEach(mutation => {
+                mutation.addedNodes.forEach(node => {
+                    if (node.id === 'storeBootstrap') {
+                        console.log("BM Script: storeBootstrap script detected, checking for button creation");
+                        if (window.location.href.includes('/players/') && !document.getElementById(BUTTON_ID)) {
+                            setTimeout(createButton, 500);
+                        }
+                    }
+                });
+            });
+            
+            // Ensure button exists after content changes on player pages
+            if (window.location.href.includes('/players/') && !document.getElementById(BUTTON_ID)) {
+                setTimeout(() => {
+                    if (!document.getElementById(BUTTON_ID)) {
+                        createButton();
+                    }
+                }, 1000);
             }
         });
 
@@ -334,11 +519,32 @@
 
         // Also check for URL changes periodically
         setInterval(checkForURLChange, 1000);
+        
+        // Listen for browser navigation events
+        window.addEventListener('popstate', checkForURLChange);
+        
+        // Override pushState and replaceState to catch programmatic navigation
+        const originalPushState = history.pushState;
+        const originalReplaceState = history.replaceState;
+        
+        history.pushState = function() {
+            originalPushState.apply(history, arguments);
+            setTimeout(checkForURLChange, 100);
+        };
+        
+        history.replaceState = function() {
+            originalReplaceState.apply(history, arguments);
+            setTimeout(checkForURLChange, 100);
+        };
     };
 
     // Initialize everything
     const initialize = () => {
-        createButton();
+        // Only create button if we're on a player page
+        if (window.location.href.includes('/players/')) {
+            createButton();
+        }
+        
         initializePageObserver();
 
         if (sessionStorage.getItem(RELOAD_FLAG) === 'true') {
