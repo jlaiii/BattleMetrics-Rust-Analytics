@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         True Rust Hours & First Seen Checker with Dynamic Top Servers Width
+// @name         BM Rust Player Information
 // @namespace    http://tampermonkey.net/
 // @version      1.0
 // @description  Shows true Rust hours, first seen date, and top 10 servers
@@ -9,196 +9,177 @@
 // @run-at       document-idle
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
-    const HOURS_RESULT_ID = 'bmt-hour-result';
-    const FIRST_SEEN_RESULT_ID = 'bmt-first-seen-result';
-    const TOP_SERVERS_CONTAINER_ID = 'bmt-top-servers-container';
-    const TOP_SERVERS_TOGGLE_ID = 'bmt-top-servers-toggle';
+    const INFO_BOX_ID = 'bmt-info-box';
     const BUTTON_ID = 'bmt-hour-button';
     const RELOAD_FLAG = 'bmt_force_recalc_after_load';
 
+    let currentPlayerID = null;
+    let lastURL = window.location.href;
+
     const removeResults = () => {
-        const idsToRemove = [HOURS_RESULT_ID, FIRST_SEEN_RESULT_ID, TOP_SERVERS_CONTAINER_ID, TOP_SERVERS_TOGGLE_ID];
-        idsToRemove.forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.remove();
-        });
+        const infoBox = document.getElementById(INFO_BOX_ID);
+        if (infoBox) infoBox.remove();
     };
 
-    const showHoursResult = (message, isError = false) => {
-        const div = document.createElement("div");
-        div.id = HOURS_RESULT_ID;
-        div.textContent = message;
-        Object.assign(div.style, {
-            position: "fixed",
-            top: "60px",
-            right: "20px",
-            backgroundColor: isError ? "#dc3545" : "#28a745",
-            color: "#fff",
-            padding: "10px 20px",
-            borderRadius: "5px",
-            zIndex: "9999",
-            fontWeight: "bold",
-            fontSize: "16px",
-            maxWidth: "400px",
-            wordWrap: "break-word",
-        });
-        document.body.appendChild(div);
-    };
+    const showInfoBox = (playerName, playerID, totalHours, firstSeenData, topServers, totalRustServers = 0, isError = false, errorMessage = "") => {
+        removeResults();
 
-    const showFirstSeenResult = (message, title = '', isError = false) => {
-        const div = document.createElement("div");
-        div.id = FIRST_SEEN_RESULT_ID;
-        const timeElement = document.createElement("time");
-        timeElement.textContent = message;
-        if (title) timeElement.title = title;
-        div.appendChild(timeElement);
-        Object.assign(div.style, {
-            position: "fixed",
-            top: "110px",
-            right: "20px",
-            backgroundColor: isError ? "#dc3545" : "#007bff",
-            color: "#fff",
-            padding: "8px 15px",
-            borderRadius: "5px",
-            zIndex: "9998",
-            fontWeight: "normal",
-            fontSize: "14px",
-            maxWidth: "400px",
-            wordWrap: "break-word",
-        });
-        document.body.appendChild(div);
-    };
+        const infoBox = document.createElement("div");
+        infoBox.id = INFO_BOX_ID;
 
-    const createToggleButton = () => {
-        if (document.getElementById(TOP_SERVERS_TOGGLE_ID)) return;
-        const btn = document.createElement("button");
-        btn.id = TOP_SERVERS_TOGGLE_ID;
-        btn.textContent = "Show Top 10 Servers ▼";
-        Object.assign(btn.style, {
-            position: "fixed",
-            top: "155px",
-            right: "20px",
-            zIndex: "10000",
-            padding: "8px 15px",
-            backgroundColor: "#17a2b8",
-            color: "#fff",
-            border: "none",
-            borderRadius: "5px",
-            cursor: "pointer",
-            whiteSpace: "nowrap",
-            fontSize: "14px",
-            fontWeight: "bold",
-        });
-        btn.onclick = () => {
-            const container = document.getElementById(TOP_SERVERS_CONTAINER_ID);
-            if (!container) return;
-            if (container.style.display === "none") {
-                container.style.display = "block";
-                btn.textContent = "Hide Top 10 Servers ▲";
-            } else {
-                container.style.display = "none";
-                btn.textContent = "Show Top 10 Servers ▼";
-            }
-        };
-        document.body.appendChild(btn);
-    };
+        // Create collapsible sections
+        let content = `
+            <div style="border-bottom: 2px solid rgba(255,255,255,0.2); padding-bottom: 12px; margin-bottom: 15px;">
+                <div style="font-size: 18px; font-weight: bold; color: #fff; margin-bottom: 8px;">
+                    Rust Player Information
+                </div>
+                <div style="font-size: 14px; opacity: 0.9;">
+                    <strong>Player:</strong> ${playerName}<br>
+                    <small>ID: ${playerID}</small>
+                </div>
+            </div>
+        `;
 
-    // Measure text width helper (uses a canvas context)
-    const measureTextWidth = (text, font) => {
-        const canvas = measureTextWidth.canvas || (measureTextWidth.canvas = document.createElement("canvas"));
-        const context = canvas.getContext("2d");
-        context.font = font;
-        return context.measureText(text).width;
-    };
-
-    const showTopServersResult = (servers) => {
-        removeTopServers(); // clear existing container if any
-
-        const container = document.createElement("div");
-        container.id = TOP_SERVERS_CONTAINER_ID;
-
-        // Choose monospace font for accurate width measurement
-        const fontStyle = "14px 'Courier New', Courier, monospace";
-
-        // Calculate max text width of server lines (name + ' — ' + hours + ' hrs')
-        let maxText = "";
-        servers.forEach(({ name, hours }) => {
-            const line = `${name} — ${hours.toFixed(2)} hrs`;
-            if (line.length > maxText.length) maxText = line;
-        });
-
-        // Measure text width in pixels, add padding, min 600px, max 900px
-        let measuredWidth = measureTextWidth(maxText, fontStyle) + 60; // add some padding
-        if (measuredWidth < 600) measuredWidth = 600;
-        if (measuredWidth > 900) measuredWidth = 900;
-
-        Object.assign(container.style, {
-            position: "fixed",
-            top: "195px",
-            right: "20px",
-            backgroundColor: "#17a2b8",
-            color: "#fff",
-            padding: "15px 20px",
-            borderRadius: "5px",
-            zIndex: "9997",
-            fontWeight: "normal",
-            fontSize: "14px",
-            fontFamily: fontStyle,
-            maxHeight: "400px",
-            overflowY: "auto",
-            whiteSpace: "nowrap", // prevent wrapping
-            width: `${measuredWidth}px`,
-            boxShadow: "0 4px 10px rgba(0,0,0,0.3)",
-            display: servers.length ? "block" : "none",
-        });
-
-        if (servers.length === 0) {
-            container.textContent = "No Rust server hours found.";
+        if (isError) {
+            content += `
+                <div style="background: rgba(220, 53, 69, 0.2); border: 1px solid #dc3545; border-radius: 5px; padding: 10px; margin-bottom: 15px;">
+                    <div style="color: #ff6b6b; font-weight: bold;">Error</div>
+                    <div style="font-size: 13px; margin-top: 5px;">${errorMessage}</div>
+                </div>
+            `;
         } else {
-            const title = document.createElement("div");
-            title.textContent = "Top 10 Rust Servers by Hours:";
-            title.style.fontWeight = "bold";
-            title.style.marginBottom = "10px";
-            title.style.fontSize = "16px";
-            container.appendChild(title);
+            // Hours section
+            content += `
+                <div style="background: rgba(40, 167, 69, 0.2); border: 1px solid #28a745; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                    <div style="font-size: 16px; font-weight: bold; color: #28a745; margin-bottom: 5px;">
+                        True Rust Hours: ${totalHours}
+                    </div>
+                </div>
+            `;
 
-            const list = document.createElement("ol");
-            list.style.paddingLeft = "20px";
+            // First seen section
+            content += `
+                <div style="background: rgba(0, 123, 255, 0.2); border: 1px solid #007bff; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                    <div style="font-size: 14px; font-weight: bold; color: #007bff; margin-bottom: 8px;">
+                        First Time Seen on Rust
+                    </div>
+                    <div style="font-size: 13px; margin-bottom: 3px;">${firstSeenData.relative}</div>
+                    ${firstSeenData.full ? `<div style="font-size: 11px; opacity: 0.8;">${firstSeenData.full}</div>` : ''}
+                </div>
+            `;
 
-            servers.forEach(({ name, hours }) => {
-                const item = document.createElement("li");
-                item.style.marginBottom = "6px";
-                item.textContent = `${name} — ${hours.toFixed(2)} hrs`;
-                list.appendChild(item);
-            });
+            // Rust servers count section
+            content += `
+                <div style="background: rgba(255, 193, 7, 0.2); border: 1px solid #ffc107; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                    <div style="font-size: 14px; font-weight: bold; color: #ffc107; margin-bottom: 5px;">
+                        Total Rust Servers Played: ${totalRustServers}
+                    </div>
+                </div>
+            `;
 
-            container.appendChild(list);
+            // Top servers section
+            content += `
+                <div style="background: rgba(23, 162, 184, 0.2); border: 1px solid #17a2b8; border-radius: 5px; padding: 12px;">
+                    <div style="font-size: 13px; font-weight: bold; color: #17a2b8; margin-bottom: 10px; cursor: pointer;" onclick="toggleServers()">
+                        Top 10 Servers <span id="servers-toggle">▼</span>
+                    </div>
+                    <div id="servers-list" style="display: block;">
+            `;
+
+            if (topServers.length === 0) {
+                content += `<div style="font-size: 13px; opacity: 0.8;">No Rust server hours found.</div>`;
+            } else {
+                content += `<ol style="padding-left: 20px; margin: 0; font-family: 'Courier New', Courier, monospace; font-size: 13px;">`;
+                topServers.forEach(({ name, hours }) => {
+                    content += `<li style="margin-bottom: 4px; line-height: 1.3;">${name} — ${hours.toFixed(2)} hrs</li>`;
+                });
+                content += `</ol>`;
+            }
+
+            content += `
+                    </div>
+                </div>
+            `;
         }
 
-        document.body.appendChild(container);
-    };
+        infoBox.innerHTML = content;
 
-    const removeTopServers = () => {
-        const container = document.getElementById(TOP_SERVERS_CONTAINER_ID);
-        if (container) container.remove();
+        Object.assign(infoBox.style, {
+            position: "fixed",
+            top: "70px",
+            right: "20px",
+            backgroundColor: "#2c3e50",
+            color: "#fff",
+            padding: "20px",
+            borderRadius: "10px",
+            zIndex: "9999",
+            fontSize: "14px",
+            maxWidth: "450px",
+            maxHeight: "80vh",
+            overflowY: "auto",
+            boxShadow: "0 8px 25px rgba(0,0,0,0.3)",
+            border: "1px solid #34495e",
+            lineHeight: "1.4"
+        });
+
+        document.body.appendChild(infoBox);
+
+        // Add toggle functionality for servers section
+        window.toggleServers = () => {
+            const serversList = document.getElementById('servers-list');
+            const toggle = document.getElementById('servers-toggle');
+            if (serversList && toggle) {
+                if (serversList.style.display === 'none') {
+                    serversList.style.display = 'block';
+                    toggle.textContent = '▼';
+                } else {
+                    serversList.style.display = 'none';
+                    toggle.textContent = '▶';
+                }
+            }
+        };
     };
 
     function toRelativeTime(timestamp) {
         const now = new Date();
         const past = new Date(timestamp);
         const diffInSeconds = Math.round((now - past) / 1000);
-        const units = { year: 31536000, month: 2592000, day: 86400, hour: 3600, minute: 60 };
+
         if (diffInSeconds < 30) return 'just now';
-        for (const unit in units) {
-            const interval = units[unit];
-            if (diffInSeconds >= interval) {
-                const count = Math.floor(diffInSeconds / interval);
-                return `${count} ${unit}${count > 1 ? 's' : ''} ago`;
-            }
+
+        // Years (with decimal precision)
+        if (diffInSeconds >= 31536000) {
+            const years = diffInSeconds / 31536000;
+            return `${years.toFixed(1)} year${years >= 2 ? 's' : ''} ago`;
         }
+
+        // Months (with decimal precision for less than a year)
+        if (diffInSeconds >= 2592000) {
+            const months = diffInSeconds / 2592000;
+            return `${months.toFixed(1)} month${months >= 2 ? 's' : ''} ago`;
+        }
+
+        // Days (show exact days for less than a month)
+        if (diffInSeconds >= 86400) {
+            const days = Math.floor(diffInSeconds / 86400);
+            return `${days} day${days > 1 ? 's' : ''} ago`;
+        }
+
+        // Hours
+        if (diffInSeconds >= 3600) {
+            const hours = Math.floor(diffInSeconds / 3600);
+            return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+        }
+
+        // Minutes
+        if (diffInSeconds >= 60) {
+            const minutes = Math.floor(diffInSeconds / 60);
+            return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+        }
+
         return 'a moment ago';
     }
 
@@ -218,15 +199,20 @@
             const pageData = JSON.parse(dataScript.textContent);
             const dataPlayerID = Object.keys(pageData.state.players.serverInfo)[0];
 
+            // Get player name for display
+            const playerData = pageData.state.players.players[urlPlayerID];
+            const playerName = playerData ? playerData.name : 'Unknown Player';
+
+            // Update current player tracking
+            currentPlayerID = urlPlayerID;
+
             if (urlPlayerID === dataPlayerID) {
                 const serverInfo = pageData.state.players.serverInfo[urlPlayerID];
                 const allServers = pageData.state.servers.servers;
 
                 if (!serverInfo) {
-                    showHoursResult("True Rust Hours: 0.00");
-                    showFirstSeenResult("First Time Seen on Rust: N/A");
-                    showTopServersResult([]);
-                    createToggleButton();
+                    const firstSeenData = { relative: "N/A", full: null };
+                    showInfoBox(playerName, urlPlayerID, "0.00", firstSeenData, [], 0);
                 } else {
                     let totalSeconds = 0;
                     let earliestRustFirstSeen = null;
@@ -250,16 +236,16 @@
                         }
                     });
 
-                    const totalHours = totalSeconds / 3600;
-                    showHoursResult(`True Rust Hours: ${totalHours.toFixed(2)}`);
+                    const totalHours = (totalSeconds / 3600).toFixed(2);
 
+                    let firstSeenData;
                     if (earliestRustFirstSeen) {
                         const firstSeenDate = new Date(earliestRustFirstSeen);
                         const relativeTime = toRelativeTime(earliestRustFirstSeen);
                         const fullDateString = firstSeenDate.toLocaleString();
-                        showFirstSeenResult(`First Time Seen on Rust: ${relativeTime}`, `Date: ${fullDateString}`);
+                        firstSeenData = { relative: relativeTime, full: fullDateString };
                     } else {
-                        showFirstSeenResult("First Time Seen on Rust: N/A");
+                        firstSeenData = { relative: "N/A", full: null };
                     }
 
                     rustServersPlayed.sort((a, b) => b.seconds - a.seconds);
@@ -267,16 +253,24 @@
                         name: s.name,
                         hours: s.seconds / 3600
                     }));
-                    showTopServersResult(top10);
-                    createToggleButton();
+
+                    showInfoBox(playerName, urlPlayerID, totalHours, firstSeenData, top10, rustServersPlayed.length);
                 }
             } else {
+                // Data mismatch - automatically refresh to get correct data
+                console.log("BM Script: Data mismatch detected. Auto-refreshing to load correct user data.");
+                const firstSeenData = { relative: "Loading...", full: null };
+                showInfoBox(playerName, urlPlayerID, "Loading...", firstSeenData, [], 0, false, "Loading data for current user...");
                 sessionStorage.setItem(RELOAD_FLAG, 'true');
-                window.location.reload();
+                setTimeout(() => {
+                    window.location.reload();
+                }, 500);
+                return;
             }
         } catch (e) {
             console.error("BM Script Error:", e);
-            showHoursResult(`Error: ${e.message}`, true);
+            const firstSeenData = { relative: "Error", full: null };
+            showInfoBox("Unknown Player", "N/A", "Error", firstSeenData, [], 0, true, e.message);
         } finally {
             if (button) {
                 button.disabled = false;
@@ -286,7 +280,10 @@
     };
 
     const createButton = () => {
-        if (document.getElementById(BUTTON_ID)) return;
+        // Remove existing button if it exists
+        const existingBtn = document.getElementById(BUTTON_ID);
+        if (existingBtn) existingBtn.remove();
+
         const btn = document.createElement("button");
         btn.id = BUTTON_ID;
         btn.textContent = "Get True Rust Hours";
@@ -306,23 +303,54 @@
         document.body.appendChild(btn);
     };
 
-    const initializePageObserver = () => {
-        const observer = new MutationObserver(() => {
-            console.log("BM Script: Page navigation detected. Clearing old results.");
+    const checkForURLChange = () => {
+        const currentURL = window.location.href;
+        if (currentURL !== lastURL) {
+            console.log("BM Script: URL change detected. Clearing old results and recreating button.");
+            lastURL = currentURL;
+            currentPlayerID = null;
             removeResults();
-        });
-
-        const targetNode = document.getElementById('content-container');
-        if (targetNode) {
-            observer.observe(targetNode, { childList: true });
+            createButton();
         }
     };
 
-    createButton();
-    initializePageObserver();
+    const initializePageObserver = () => {
+        // Watch for URL changes (navigation between profiles)
+        const urlObserver = new MutationObserver(() => {
+            checkForURLChange();
+        });
 
-    if (sessionStorage.getItem(RELOAD_FLAG) === 'true') {
-        sessionStorage.removeItem(RELOAD_FLAG);
-        setTimeout(calculateOrReload, 250);
+        // Watch for content changes
+        const contentObserver = new MutationObserver(() => {
+            // Ensure button exists after content changes
+            if (!document.getElementById(BUTTON_ID)) {
+                createButton();
+            }
+        });
+
+        const targetNode = document.getElementById('content-container') || document.body;
+        urlObserver.observe(targetNode, { childList: true, subtree: true });
+        contentObserver.observe(document.body, { childList: true });
+
+        // Also check for URL changes periodically
+        setInterval(checkForURLChange, 1000);
+    };
+
+    // Initialize everything
+    const initialize = () => {
+        createButton();
+        initializePageObserver();
+
+        if (sessionStorage.getItem(RELOAD_FLAG) === 'true') {
+            sessionStorage.removeItem(RELOAD_FLAG);
+            setTimeout(calculateOrReload, 250);
+        }
+    };
+
+    // Wait for page to be ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initialize);
+    } else {
+        initialize();
     }
 })();
