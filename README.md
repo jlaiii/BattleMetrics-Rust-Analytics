@@ -23,7 +23,7 @@ This is a **user script** and requires a browser extension to run.
 
 2.  Click the "Raw" button on the script file or go to the following URL:
 
-    `https://github.com/jlaiii/battlemetrics-rust-analytics/raw/main/BattleMetrics%20Rust%20Analytics.user.js`
+    https://github.com/jlaiii/BattleMetrics-Rust-Player-Analytics/raw/refs/heads/main/BattleMetrics%20True%20Rust%20Hours%20&%20First%20Seen%20Checker-1.0.user.js
 
 3.  Your user script manager will prompt you to install the script. Review the code and confirm the installation.
 
