@@ -2,7 +2,7 @@
 // @name         BattleMetrics Rust Analytics
 // @namespace    http://tampermonkey.net/
 // @version      1.0
-// @description  analytics tool for BattleMetrics that displays comprehensive Rust player statistics including total playtime, first seen date, and server history
+// @description  analytics tool for BattleMetrics that displays Rust player statistics including total playtime, first seen date, and their top servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/*
 // @grant        none
@@ -18,6 +18,7 @@
 
     let currentPlayerID = null;
     let lastURL = window.location.href;
+    let cachedPlayerData = null;
 
     const removeResults = () => {
         const infoBox = document.getElementById(INFO_BOX_ID);
@@ -198,7 +199,7 @@
 
             try {
                 const pageData = JSON.parse(dataScript.textContent);
-                
+
                 // Debug logging
                 console.log("BM Script Debug: pageData structure:", {
                     hasState: !!pageData?.state,
@@ -209,11 +210,11 @@
                     hasServersData: !!pageData?.state?.servers?.servers,
                     currentURL: window.location.href
                 });
-                
+
                 if (!pageData || !pageData.state) {
                     return { ready: false, reason: "Invalid page data structure" };
                 }
-                
+
                 if (!pageData.state.players || !pageData.state.players.serverInfo) {
                     return { ready: false, reason: "Player data not available" };
                 }
@@ -221,6 +222,12 @@
                 const serverInfoKeys = Object.keys(pageData.state.players.serverInfo);
                 if (serverInfoKeys.length === 0) {
                     return { ready: false, reason: "No server information found" };
+                }
+
+                // Check if the data matches the current URL player ID
+                const urlPlayerID = window.location.pathname.split('/players/')[1]?.split('/')[0];
+                if (urlPlayerID && !pageData.state.players.serverInfo[urlPlayerID]) {
+                    return { ready: false, reason: "Data doesn't match current player" };
                 }
 
                 if (!pageData.state.servers || !pageData.state.servers.servers) {
@@ -234,7 +241,7 @@
         };
 
         const dataCheck = isDataReady();
-        
+
         // If data isn't ready, retry up to 8 times (longer wait for navigation)
         if (!dataCheck.ready) {
             if (retryCount < 8) {
@@ -257,7 +264,7 @@
 
             const pageData = dataCheck.pageData;
             const serverInfoKeys = Object.keys(pageData.state.players.serverInfo);
-            
+
             const dataPlayerID = serverInfoKeys[0];
 
             // Get player name for display
@@ -272,8 +279,11 @@
                 }
             }
 
-            // Update current player tracking
-            currentPlayerID = urlPlayerID;
+            // Update current player tracking and clear cache if player changed
+            if (currentPlayerID !== urlPlayerID) {
+                cachedPlayerData = null;
+                currentPlayerID = urlPlayerID;
+            }
 
             if (urlPlayerID === dataPlayerID) {
                 const serverInfo = pageData.state.players.serverInfo[urlPlayerID];
@@ -324,7 +334,7 @@
                     }));
 
                     showInfoBox(playerName, urlPlayerID, totalHours, firstSeenData, top10, rustServersPlayed.length);
-                    
+
                     // Reset button on success
                     if (button) {
                         button.disabled = false;
@@ -332,65 +342,17 @@
                     }
                 }
             } else {
-                // Data mismatch - wait a bit and try again, or refresh if needed
+                // Data mismatch - this means we have stale data from previous player
                 console.log("BM Script: Data mismatch detected. Player ID from URL:", urlPlayerID, "Data ID:", dataPlayerID);
-                
-                // Try to use the data we have anyway if it exists
-                const availableServerInfo = pageData.state.players.serverInfo[dataPlayerID];
-                if (availableServerInfo) {
-                    console.log("BM Script: Using available data for player:", dataPlayerID);
-                    const allServers = pageData.state.servers.servers;
-                    
-                    let totalSeconds = 0;
-                    let earliestRustFirstSeen = null;
-                    const rustServersPlayed = [];
 
-                    Object.values(availableServerInfo).forEach(playerStats => {
-                        const serverId = playerStats.serverId;
-                        const serverDetails = allServers[serverId];
-                        if (serverDetails && serverDetails.game_id === 'rust') {
-                            const timePlayed = playerStats.timePlayed || 0;
-                            totalSeconds += timePlayed;
-
-                            if (earliestRustFirstSeen === null || playerStats.firstSeen < earliestRustFirstSeen) {
-                                earliestRustFirstSeen = playerStats.firstSeen;
-                            }
-
-                            rustServersPlayed.push({
-                                name: serverDetails.name || "Unnamed Server",
-                                seconds: timePlayed
-                            });
-                        }
-                    });
-
-                    const totalHours = (totalSeconds / 3600).toFixed(2);
-
-                    let firstSeenData;
-                    if (earliestRustFirstSeen) {
-                        const firstSeenDate = new Date(earliestRustFirstSeen);
-                        const relativeTime = toRelativeTime(earliestRustFirstSeen);
-                        const fullDateString = firstSeenDate.toLocaleString();
-                        firstSeenData = { relative: relativeTime, full: fullDateString };
-                    } else {
-                        firstSeenData = { relative: "N/A", full: null };
-                    }
-
-                    rustServersPlayed.sort((a, b) => b.seconds - a.seconds);
-                    const top10 = rustServersPlayed.slice(0, 10).map(s => ({
-                        name: s.name,
-                        hours: s.seconds / 3600
-                    }));
-
-                    showInfoBox(playerName, urlPlayerID, totalHours, firstSeenData, top10, rustServersPlayed.length);
-                    
-                    // Reset button on success
-                    if (button) {
-                        button.disabled = false;
-                        button.textContent = "Get Rust Analytics";
-                    }
+                // Don't use stale data - wait for correct data or force reload
+                if (retryCount < 5) {
+                    console.log(`BM Script: Waiting for correct player data... (attempt ${retryCount + 1}/5)`);
+                    setTimeout(() => calculateOrReload(retryCount + 1), 2000);
+                    return;
                 } else {
-                    // Last resort - refresh the page
-                    console.log("BM Script: No usable data found. Auto-refreshing to load correct user data.");
+                    // After retries, force page reload to get fresh data
+                    console.log("BM Script: Data still mismatched after retries. Auto-refreshing to load correct user data.");
                     const firstSeenData = { relative: "Loading...", full: null };
                     showInfoBox(playerName, urlPlayerID, "Loading...", firstSeenData, [], 0, false, "Loading data for current user...");
                     sessionStorage.setItem(RELOAD_FLAG, 'true');
@@ -404,7 +366,7 @@
             console.error("BM Script Error:", e);
             const firstSeenData = { relative: "Error", full: null };
             showInfoBox("Unknown Player", "N/A", "Error", firstSeenData, [], 0, true, e.message);
-            
+
             // Reset button
             if (button) {
                 button.disabled = false;
@@ -439,7 +401,7 @@
 
     const waitForDataAndCreateButton = (attempt = 0) => {
         const maxAttempts = 15; // Wait longer for navigation
-        
+
         // Check if data is ready
         const dataScript = document.getElementById('storeBootstrap');
         if (dataScript) {
@@ -457,7 +419,7 @@
                 // Data not ready yet
             }
         }
-        
+
         // If data not ready and we haven't exceeded max attempts, try again
         if (attempt < maxAttempts) {
             console.log(`BM Script: Waiting for data to load... (${attempt + 1}/${maxAttempts})`);
@@ -474,8 +436,9 @@
             console.log("BM Script: URL change detected. Clearing old results and recreating button.");
             lastURL = currentURL;
             currentPlayerID = null;
+            cachedPlayerData = null; // Clear cached data on navigation
             removeResults();
-            
+
             // Only create button on player pages, wait for data to be ready
             if (currentURL.includes('/players/')) {
                 waitForDataAndCreateButton();
@@ -502,7 +465,7 @@
                     }
                 });
             });
-            
+
             // Ensure button exists after content changes on player pages
             if (window.location.href.includes('/players/') && !document.getElementById(BUTTON_ID)) {
                 setTimeout(() => {
@@ -519,20 +482,20 @@
 
         // Also check for URL changes periodically
         setInterval(checkForURLChange, 1000);
-        
+
         // Listen for browser navigation events
         window.addEventListener('popstate', checkForURLChange);
-        
+
         // Override pushState and replaceState to catch programmatic navigation
         const originalPushState = history.pushState;
         const originalReplaceState = history.replaceState;
-        
-        history.pushState = function() {
+
+        history.pushState = function () {
             originalPushState.apply(history, arguments);
             setTimeout(checkForURLChange, 100);
         };
-        
-        history.replaceState = function() {
+
+        history.replaceState = function () {
             originalReplaceState.apply(history, arguments);
             setTimeout(checkForURLChange, 100);
         };
@@ -544,7 +507,7 @@
         if (window.location.href.includes('/players/')) {
             createButton();
         }
-        
+
         initializePageObserver();
 
         if (sessionStorage.getItem(RELOAD_FLAG) === 'true') {
