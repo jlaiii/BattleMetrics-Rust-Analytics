@@ -1,4 +1,3 @@
-```
 # BattleMetrics Rust Analytics
 
 A Tampermonkey user script that enhances the BattleMetrics player profile page with detailed Rust-specific player statistics.
@@ -59,4 +58,3 @@ Suggestions and bug reports are welcome! Please open an issue on the GitHub repo
 ## License
 
 This project is licensed under the MIT License.
-```
