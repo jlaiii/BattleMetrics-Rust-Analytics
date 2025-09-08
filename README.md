@@ -1,113 +1,62 @@
-# BattleMetrics True Rust Hours
+```
+# BattleMetrics Rust Analytics
 
-![Version](https://img.shields.io/badge/version-1.0-blue.svg)
+A Tampermonkey user script that enhances the BattleMetrics player profile page with detailed Rust-specific player statistics.
 
-A Tampermonkey script for serious Rust admins and players. This tool digs into BattleMetrics player profiles and reveals the two most critical statistics:
+![Screenshot of the script in action](https://i.imgur.com/pFqLkmI.png)
 
-- **True total hours spent on Rust servers**
-- **The first-ever tracked appearance on a Rust server**
+## Features
 
----
-
-## 🔍 The Problem
-
-You check someone’s Steam profile and see "Time Played: 6,000 hours." Impressive… or is it?
-
-For all you know, they could’ve spent most of that time AFK in the main menu.
-
-This tool gives you the real picture by checking and adding up the actual time spent playing on Rust servers.
-
-Whether you're verifying someone manually or using BattleMetrics, this script automatically totals their playtime across all servers—no more clicking and adding each one by hand.
+- **True Rust Hours**: Calculates and displays a player's total playtime exclusively on Rust servers.
+- **First Seen Date**: Shows the first date the player was seen on any Rust server tracked by BattleMetrics, both as a relative time (e.g., "2 years ago") and a full date.
+- **Top Servers**: Lists the top 10 Rust servers the player has spent the most time on.
+- **Total Rust Servers**: Displays the total number of unique Rust servers the player has played on.
 
 ---
 
-## ✅ The Solution
+## Installation
 
-This script adds a single button to every BattleMetrics player profile. When clicked, it calculates and shows:
+This is a **user script** and requires a browser extension to run.
 
-1. **Total Rust Hours** – The sum of all `timePlayed` values for Rust-identified servers.
-2. **First Seen on Rust** – The earliest `firstSeen` date across all Rust servers visited.
+1.  Install a user script manager extension for your browser. Recommended options are:
+    -   [**Tampermonkey**](https://www.tampermonkey.net/) (Chrome, Firefox, Edge, Safari)
+    -   [**Greasemonkey**](https://addons.mozilla.org/en-US/firefox/addon/greasemonkey/) (Firefox)
 
-No guessing. Just accurate, Rust-specific stats in seconds.
+2.  Click the "Raw" button on the script file or go to the following URL:
 
-![Screenshot 1](https://i.imgur.com/VOd2K9k.png)
+    `https://github.com/jlaiii/battlemetrics-rust-analytics/raw/main/BattleMetrics%20Rust%20Analytics.user.js`
 
-![Screenshot 2](https://i.imgur.com/kFekEq1.png)
----
-
-## ⚙️ Features
-
-- **Rust-Only Hour Calculation** – Filters out non-Rust servers.
-- **Friendly Time Format** – Shows "2 years ago" with exact time on hover.
-- **Non-Intrusive UI** – A lightweight and seamless experience.
-- **Optimized Performance** – Runs only when you click the button.
+3.  Your user script manager will prompt you to install the script. Review the code and confirm the installation.
 
 ---
 
-## 🧪 Demo
+## Usage
 
-1. Go to any BattleMetrics player page.
-2. A new button will appear:
+1.  Navigate to any player's profile page on `battlemetrics.com`.
+2.  A new button labeled "**Get Rust Analytics**" will appear on the top right of the page.
+3.  Click the button to fetch and display the player's Rust statistics in a new info box on the page.
 
-   ```
-   [ Get True Rust Hours ]
-   ```
-
-3. Click it. The following results will appear:
-
-   ```
-   Total Rust Hours: 4321.56
-   ```
-
-   ```
-   First seen on Rust: 2 years ago
-   ```
-
-   *Hover to see exact time, like:* `Date: 10/26/2021, 8:15:30 PM`
+If you navigate to a different player's page, the script will automatically detect the change and prompt you to get the new player's stats.
 
 ---
 
-## 🚀 Installation
+## Troubleshooting
 
-To use this script, install a user script manager like [Tampermonkey](https://www.tampermonkey.net/).
-
-### Step-by-Step:
-
-1. **Install a Script Manager**  
-   - [Tampermonkey](https://www.tampermonkey.net/) (Chrome, Firefox, Edge, Safari)  
-   - [Greasemonkey](https://www.greasespot.net/) (Firefox)  
-   - [Violentmonkey](https://violentmonkey.github.io/) (Chrome, Firefox, Edge)  
-
-2. **Install This Script**  
-
-   ```
-   https://github.com/jlaiii/BattleMetrics-True-Rust-Hours-First-Seen-Checker/raw/refs/heads/main/BattleMetrics%20True%20Rust%20Hours%20&%20First%20Seen%20Checker-1.0.user.js
-   ```
-
-3. Your script manager will ask you to confirm. Click **Install**.
+-   **"Waiting for data..."** The script needs to wait for BattleMetrics to load all the player's data before it can calculate the hours. This can take a few seconds.
+-   **No button appears**:
+    -   Ensure you are on a player's profile page (URL should be `https://www.battlemetrics.com/players/...`).
+    -   Check if your user script manager is enabled and the script is active for `battlemetrics.com`.
+-   **Incorrect hours**: The script only calculates playtime on servers that have the game set to "Rust" in BattleMetrics. Playtime on incorrectly tagged servers may not be included.
 
 ---
 
-## 🧠 How It Works (For Nerds)
+## Contributing
 
-BattleMetrics player pages include a hidden `<script id="storeBootstrap">` tag with a full JSON data dump.
-
-The script does this:
-
-1. Parses that JSON to grab player stats.
-2. Loops through each server.
-3. If `game_id === 'rust'`, it adds the `timePlayed` and checks the `firstSeen` date.
-4. Shows the final results in fixed-position, styled boxes.
-5. Checks for stale data (wrong player ID) and reloads the page if needed.
+Suggestions and bug reports are welcome! Please open an issue on the GitHub repository or submit a pull request with your changes.
 
 ---
 
-## 📜 License & Usage
+## License
 
-This script and code are **100% created and owned by me**.
-
-- ✅ Free to use for personal or educational purposes.
-- 🚫 **Commercial use requires permission.**
-- 📩 Contact me through GitHub if you plan to use this in a paid tool, service, or product.
-
----
+This project is licensed under the MIT License.
+```
