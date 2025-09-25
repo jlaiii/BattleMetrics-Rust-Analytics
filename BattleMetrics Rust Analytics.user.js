@@ -45,14 +45,14 @@
         const button = document.getElementById(BUTTON_ID);
         const infoBox = document.getElementById(INFO_BOX_ID);
         const visible = isMenuVisible();
-        
+
         if (button) {
             button.style.display = visible ? 'block' : 'none';
         }
         if (infoBox) {
             infoBox.style.display = visible ? 'block' : 'none';
         }
-        
+
         updateToggleButton();
     };
 
@@ -76,7 +76,7 @@
             const currentlyVisible = isMenuVisible();
             setMenuVisibility(!currentlyVisible);
         };
-        
+
         Object.assign(toggleBtn.style, {
             position: "fixed",
             top: "20px",
@@ -91,7 +91,7 @@
             fontSize: "14px",
             fontWeight: "bold"
         });
-        
+
         document.body.appendChild(toggleBtn);
         updateToggleButton();
     };
@@ -161,7 +161,7 @@
             content += `
                 <div style="background: rgba(23, 162, 184, 0.2); border: 1px solid #17a2b8; border-radius: 5px; padding: 12px;">
                     <div style="font-size: 13px; font-weight: bold; color: #17a2b8; margin-bottom: 10px; cursor: pointer;" onclick="toggleServers()">
-                        Players Top Servers by Hours <span id="servers-toggle">▼</span>
+                        Top Servers by Hours <span id="servers-toggle">▼</span>
                     </div>
                     <div id="servers-list" style="display: block;">
             `;
@@ -171,8 +171,8 @@
             } else {
                 content += `<div id="servers-content"></div>`;
 
-                // Add pagination controls if more than 5 servers
-                if (topServers.length > 5) {
+                // Add pagination controls if more than 10 servers
+                if (topServers.length > 10) {
                     content += `
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.2);">
                             <button onclick="previousServerPage()" id="prev-btn" style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
@@ -223,7 +223,7 @@
         });
 
         document.body.appendChild(infoBox);
-        
+
         // Apply current visibility state
         updateButtonsVisibility();
 
@@ -251,7 +251,7 @@
 
             if (!serversContent || allTopServers.length === 0) return;
 
-            const serversPerPage = 5;
+            const serversPerPage = 10;
             const startIndex = currentServerPage * serversPerPage;
             const endIndex = Math.min(startIndex + serversPerPage, allTopServers.length);
             const currentServers = allTopServers.slice(startIndex, endIndex);
@@ -283,7 +283,7 @@
         };
 
         window.nextServerPage = () => {
-            const totalPages = Math.ceil(allTopServers.length / 5);
+            const totalPages = Math.ceil(allTopServers.length / 10);
             if (currentServerPage < totalPages - 1) {
                 currentServerPage++;
                 window.updateServersList();
@@ -322,26 +322,56 @@
 
             const totalServers = document.querySelector('#bmt-info-box').textContent.match(/Total Rust Servers Played: (\d+)/)?.[1] || '0';
 
-            let top10List = '';
+            // Get current server info (most recently played)
+            let currentServer = 'Not currently playing';
+
+            if (allTopServers.length > 0) {
+                // Assume the first server in the list is the most recent/current
+                currentServer = allTopServers[0].name;
+            }
+
+            // Full server list (top 10)
+            let fullServerList = '';
             if (allTopServers.length > 0) {
                 const top10 = allTopServers.slice(0, 10);
-                top10List = top10.map((server, index) =>
+                fullServerList = top10.map((server, index) =>
                     `${index + 1}. ${server.name} — ${server.hours.toFixed(2)} hrs`
                 ).join('\n');
             } else {
-                top10List = 'No servers found';
+                fullServerList = 'No servers found';
             }
 
-            const copyText = `\`\`\`Rust Player Stats
-            
-Player Name: ${playerName}
-Player ID: ${playerID}
-True Rust Hours: ${totalHours}
-First Time Seen: ${firstSeen}
-Total Rust Servers Played: ${totalServers}
+            // Get top 5 recent servers for "Recently Played" section with last seen
+            let recentServers = '';
+            if (allTopServers.length > 0) {
+                const recent5 = allTopServers.slice(0, 5);
+                recentServers = recent5.map((server, index) => {
+                    let lastSeenText = '';
+                    if (server.lastSeen) {
+                        const lastSeenTime = toRelativeTime(server.lastSeen);
+                        lastSeenText = ` (last seen ${lastSeenTime})`;
+                    }
+                    return `${index + 1}. ${server.name} — ${server.hours.toFixed(2)} hrs${lastSeenText}`;
+                }).join('\n');
+            } else {
+                recentServers = 'No recent servers found';
+            }
 
-Players Top 10 Servers by Hours:
-${top10List}
+            const copyText = `\`\`\`Rust Player Profile
+
+Player: ${playerName}
+Steam ID: ${playerID}
+Total Rust Hours: ${totalHours}
+First Seen: ${firstSeen}
+Total Servers Played: ${totalServers}
+
+Current Server: ${currentServer}
+
+Top 10 Servers by Hours:
+${fullServerList}
+
+Recently Played Servers:
+${recentServers}
 
 Generated by BattleMetrics Rust Analytics\`\`\``;
 
@@ -549,7 +579,8 @@ Generated by BattleMetrics Rust Analytics\`\`\``;
 
                             rustServersPlayed.push({
                                 name: serverDetails.name || "Unnamed Server",
-                                seconds: timePlayed
+                                seconds: timePlayed,
+                                lastSeen: playerStats.lastSeen
                             });
                         }
                     });
@@ -569,7 +600,8 @@ Generated by BattleMetrics Rust Analytics\`\`\``;
                     rustServersPlayed.sort((a, b) => b.seconds - a.seconds);
                     const processedServers = rustServersPlayed.map(s => ({
                         name: s.name,
-                        hours: s.seconds / 3600
+                        hours: s.seconds / 3600,
+                        lastSeen: s.lastSeen
                     }));
 
                     showInfoBox(playerName, urlPlayerID, totalHours, firstSeenData, processedServers, rustServersPlayed.length);
@@ -636,10 +668,10 @@ Generated by BattleMetrics Rust Analytics\`\`\``;
             cursor: "pointer",
         });
         document.body.appendChild(btn);
-        
+
         // Create toggle button
         createToggleButton();
-        
+
         // Apply current visibility state
         updateButtonsVisibility();
     };
