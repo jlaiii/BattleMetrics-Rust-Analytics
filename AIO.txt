@@ -2689,14 +2689,9 @@
         const dataCheck = isDataReady();
 
         if (!dataCheck.ready) {
-            if (retryCount < 8) {
-                setTimeout(() => calculatePlayerAnalytics(retryCount + 1), 2000);
-                return;
-            } else {
-                sessionStorage.setItem(PLAYER_RELOAD_FLAG, 'true');
-                window.location.reload();
-                return;
-            }
+            sessionStorage.setItem(PLAYER_RELOAD_FLAG, 'true');
+            window.location.reload();
+            return;
         }
 
         try {
@@ -2780,18 +2775,11 @@
                     }
                 }
             } else {
-                if (retryCount < 5) {
-                    setTimeout(() => calculatePlayerAnalytics(retryCount + 1), 2000);
-                    return;
-                } else {
-                    const firstSeenData = { relative: "Loading...", full: null };
-                    showPlayerInfoBox(playerName, urlPlayerID, "Loading...", firstSeenData, [], 0, false, "Loading data for current user...");
-                    sessionStorage.setItem(PLAYER_RELOAD_FLAG, 'true');
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 500);
-                    return;
-                }
+                const firstSeenData = { relative: "Loading...", full: null };
+                showPlayerInfoBox(playerName, urlPlayerID, "Loading...", firstSeenData, [], 0, false, "Loading data for current user...");
+                sessionStorage.setItem(PLAYER_RELOAD_FLAG, 'true');
+                window.location.reload();
+                return;
             }
         } catch (e) {
             console.error("Player Analytics Error:", e);
@@ -2841,10 +2829,10 @@
         // Auto-load player data when page loads
         if (sessionStorage.getItem(PLAYER_RELOAD_FLAG) === 'true') {
             sessionStorage.removeItem(PLAYER_RELOAD_FLAG);
-            setTimeout(calculatePlayerAnalytics, 1000);
+            setTimeout(calculatePlayerAnalytics, 0); // Instant load after reload
         } else {
             // Automatically load player analytics data
-            setTimeout(calculatePlayerAnalytics, 2000);
+            setTimeout(calculatePlayerAnalytics, 500); // Faster initial load
         }
     };
 
