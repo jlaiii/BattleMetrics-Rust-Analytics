@@ -371,7 +371,7 @@
             const copyText = `\`\`\`Rust Player Profile
 
 Player: ${playerName}
-Steam ID: ${playerID}
+battlemetrics id: ${playerID}
 Total Rust Hours: ${totalHours}
 First Seen: ${firstSeen}
 Total Servers Played: ${totalServers}
