@@ -1,0 +1,2270 @@
+// ==UserScript==
+// @name         BattleMetrics Server Monitor & Alert System
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
+// @author       jlaiii
+// @match        https://www.battlemetrics.com/servers/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // Constants - make them tab-specific to prevent cross-tab interference
+    const SERVER_MONITOR_ID = `bms-server-monitor-${Math.random().toString(36).substr(2, 9)}`;
+    const TOGGLE_BUTTON_ID = `bms-toggle-button-${Math.random().toString(36).substr(2, 9)}`;
+    const ALERT_PANEL_ID = `bms-alert-panel-${Math.random().toString(36).substr(2, 9)}`;
+    const MENU_VISIBLE_KEY = 'bms_menu_visible';
+    
+    // Server-specific storage keys (will be set after server ID is determined)
+    let ALERTS_KEY = '';
+    let ACTIVITY_LOG_KEY = '';
+    let ALERT_SETTINGS_KEY = '';
+    let SAVED_PLAYERS_KEY = '';
+    let RECENT_ALERTS_KEY = '';
+    let PLAYER_DATABASE_KEY = '';
+    let POPULATION_HISTORY_KEY = '';
+    let LAST_PLAYER_STATE_KEY = '';
+    
+    // Function to initialize server-specific keys
+    const initializeStorageKeys = (serverID) => {
+        ALERTS_KEY = `bms_player_alerts_${serverID}`;
+        ACTIVITY_LOG_KEY = `bms_activity_log_${serverID}`;
+        ALERT_SETTINGS_KEY = `bms_alert_settings_${serverID}`;
+        SAVED_PLAYERS_KEY = `bms_saved_players_${serverID}`;
+        RECENT_ALERTS_KEY = `bms_recent_alerts_${serverID}`;
+        PLAYER_DATABASE_KEY = `bms_player_database_${serverID}`;
+        POPULATION_HISTORY_KEY = `bms_population_history_${serverID}`;
+        LAST_PLAYER_STATE_KEY = `bms_last_player_state_${serverID}`;
+    };
+
+    // Global variables - each tab will have its own instance
+    let currentServerID = null;
+    let serverMonitor = null;
+    let monitoringInterval = null;
+    let lastPlayerList = new Map();
+    let currentServerName = '';
+    let alertReminderInterval = null;
+    
+    // Population tracking variables
+    let populationHistory = [];
+    let currentPopulation = 0;
+    let lastHourChange = 0;
+    let predictedNextHour = 0;
+    
+    // Search state tracking to prevent interference
+    let activePlayerSearch = '';
+    let activeDatabaseSearch = '';
+    
+    // Generate unique tab identifier to prevent cross-tab interference
+    const tabId = Math.random().toString(36).substr(2, 9);
+
+    // Utility functions
+    const isMenuVisible = () => {
+        return localStorage.getItem(MENU_VISIBLE_KEY) !== 'false';
+    };
+
+    const setMenuVisibility = (visible) => {
+        localStorage.setItem(MENU_VISIBLE_KEY, visible.toString());
+        updateUIVisibility();
+    };
+
+    const updateUIVisibility = () => {
+        const monitor = document.getElementById(SERVER_MONITOR_ID);
+        const alertPanel = document.getElementById(ALERT_PANEL_ID);
+        const visible = isMenuVisible();
+
+        if (monitor) {
+            monitor.style.display = visible ? 'block' : 'none';
+        }
+        if (alertPanel && !visible) {
+            alertPanel.style.display = 'none';
+        }
+
+        updateToggleButton();
+    };
+
+    const updateToggleButton = () => {
+        const toggleBtn = document.getElementById(TOGGLE_BUTTON_ID);
+        if (toggleBtn) {
+            const visible = isMenuVisible();
+            toggleBtn.textContent = visible ? 'X' : 'SM';
+            toggleBtn.title = visible ? 'Hide Server Monitor' : 'Show Server Monitor';
+        }
+    };
+
+    const toRelativeTime = (timestamp) => {
+        const now = Date.now();
+        const diff = now - new Date(timestamp).getTime();
+        const seconds = Math.floor(diff / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+
+        if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`;
+        if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+        if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+        return 'a few seconds ago';
+    };
+
+    // Server Monitor Class
+    class ServerMonitor {
+        constructor() {
+            this.alerts = this.loadAlerts();
+            this.activityLog = this.loadActivityLog();
+            this.settings = this.loadSettings();
+            this.savedPlayers = this.loadSavedPlayers();
+            this.recentAlerts = this.loadRecentAlerts();
+            this.playerDatabase = this.loadPlayerDatabase();
+            this.populationHistory = this.loadPopulationHistory();
+            this.lastPlayerState = this.loadLastPlayerState();
+            this.isMonitoring = false;
+            this.currentPlayers = new Map();
+            this.soundEnabled = this.settings.soundEnabled !== false;
+        }
+
+        loadAlerts() {
+            try {
+                return JSON.parse(localStorage.getItem(ALERTS_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        saveAlerts() {
+            localStorage.setItem(ALERTS_KEY, JSON.stringify(this.alerts));
+        }
+
+        loadActivityLog() {
+            try {
+                const log = JSON.parse(localStorage.getItem(ACTIVITY_LOG_KEY) || '[]');
+                return log.slice(-1000); // Keep last 1000 entries
+            } catch {
+                return [];
+            }
+        }
+
+        saveActivityLog() {
+            localStorage.setItem(ACTIVITY_LOG_KEY, JSON.stringify(this.activityLog.slice(-1000)));
+        }
+
+        loadSettings() {
+            try {
+                return JSON.parse(localStorage.getItem(ALERT_SETTINGS_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        saveSettings() {
+            localStorage.setItem(ALERT_SETTINGS_KEY, JSON.stringify(this.settings));
+        }
+
+        loadSavedPlayers() {
+            try {
+                return JSON.parse(localStorage.getItem(SAVED_PLAYERS_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        saveSavedPlayers() {
+            localStorage.setItem(SAVED_PLAYERS_KEY, JSON.stringify(this.savedPlayers));
+        }
+
+        savePlayer(playerName, playerId) {
+            this.savedPlayers[playerId] = {
+                name: playerName,
+                saved: Date.now()
+            };
+            this.saveSavedPlayers();
+        }
+
+        removeSavedPlayer(playerId) {
+            delete this.savedPlayers[playerId];
+            this.saveSavedPlayers();
+        }
+
+        loadRecentAlerts() {
+            try {
+                return JSON.parse(localStorage.getItem(RECENT_ALERTS_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        saveRecentAlerts() {
+            localStorage.setItem(RECENT_ALERTS_KEY, JSON.stringify(this.recentAlerts));
+        }
+
+        addRecentAlert(playerName, playerId, action) {
+            const alertId = `${playerId}_${action}_${Date.now()}`;
+            this.recentAlerts[alertId] = {
+                playerName,
+                playerId,
+                action,
+                timestamp: Date.now(),
+                acknowledged: false
+            };
+            this.saveRecentAlerts();
+            this.updateRecentAlertsDisplay();
+            this.startAlertReminders();
+        }
+
+        acknowledgeAlert(alertId) {
+            if (this.recentAlerts[alertId]) {
+                this.recentAlerts[alertId].acknowledged = true;
+                this.saveRecentAlerts();
+                this.updateRecentAlertsDisplay();
+                
+                // Check if all alerts are acknowledged
+                const unacknowledged = Object.values(this.recentAlerts).filter(alert => !alert.acknowledged);
+                if (unacknowledged.length === 0) {
+                    this.stopAlertReminders();
+                    // Trigger reorder when all alerts are acknowledged
+                    setTimeout(() => this.reorderSectionsIfNeeded(), 100);
+                }
+            }
+        }
+
+        clearOldAlerts() {
+            const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+            Object.keys(this.recentAlerts).forEach(alertId => {
+                if (this.recentAlerts[alertId].timestamp < oneDayAgo) {
+                    delete this.recentAlerts[alertId];
+                }
+            });
+            this.saveRecentAlerts();
+        }
+
+        startAlertReminders() {
+            if (alertReminderInterval || this.settings.repeatAlerts === false) return;
+            
+            alertReminderInterval = setInterval(() => {
+                const unacknowledged = Object.values(this.recentAlerts).filter(alert => !alert.acknowledged);
+                if (unacknowledged.length > 0 && this.soundEnabled && this.settings.repeatAlerts !== false) {
+                    this.playAlertSound();
+                }
+            }, 60000); // Every 1 minute
+        }
+
+        stopAlertReminders() {
+            if (alertReminderInterval) {
+                clearInterval(alertReminderInterval);
+                alertReminderInterval = null;
+            }
+        }
+
+        loadPlayerDatabase() {
+            try {
+                const saved = localStorage.getItem(PLAYER_DATABASE_KEY);
+                if (saved) {
+                    const database = JSON.parse(saved);
+                    console.log(`Loaded ${Object.keys(database).length} players from database`);
+                    return database;
+                }
+                return {};
+            } catch (e) {
+                console.error('Failed to load player database:', e);
+                return {};
+            }
+        }
+
+        savePlayerDatabase() {
+            // Debounce database saves to reduce localStorage writes
+            clearTimeout(this.databaseSaveTimeout);
+            this.databaseSaveTimeout = setTimeout(() => {
+                try {
+                    localStorage.setItem(PLAYER_DATABASE_KEY, JSON.stringify(this.playerDatabase));
+                    console.log('Player database saved to localStorage');
+                } catch (e) {
+                    console.error('Failed to save player database:', e);
+                }
+            }, 2000);
+        }
+
+        loadPopulationHistory() {
+            try {
+                const saved = localStorage.getItem(POPULATION_HISTORY_KEY);
+                if (saved) {
+                    const history = JSON.parse(saved);
+                    // Keep only last 24 hours of data
+                    const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+                    return history.filter(entry => entry.timestamp > oneDayAgo);
+                }
+                return [];
+            } catch (e) {
+                console.error('Failed to load population history:', e);
+                return [];
+            }
+        }
+
+        savePopulationHistory() {
+            try {
+                // Keep only last 24 hours of data
+                const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+                this.populationHistory = this.populationHistory.filter(entry => entry.timestamp > oneDayAgo);
+                localStorage.setItem(POPULATION_HISTORY_KEY, JSON.stringify(this.populationHistory));
+            } catch (e) {
+                console.error('Failed to save population history:', e);
+            }
+        }
+
+        recordPopulation(count) {
+            const now = Date.now();
+            this.populationHistory.push({
+                timestamp: now,
+                count: count
+            });
+            
+            // Calculate last hour change and prediction
+            this.calculatePopulationStats();
+            this.savePopulationHistory();
+            this.updatePopulationDisplay();
+        }
+
+        loadLastPlayerState() {
+            try {
+                const saved = localStorage.getItem(LAST_PLAYER_STATE_KEY);
+                if (saved) {
+                    const state = JSON.parse(saved);
+                    // Only use state if it's recent (within last 5 minutes)
+                    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+                    if (state.timestamp > fiveMinutesAgo) {
+                        return new Map(state.players);
+                    }
+                }
+                return new Map();
+            } catch (e) {
+                console.error('Failed to load last player state:', e);
+                return new Map();
+            }
+        }
+
+        saveLastPlayerState() {
+            try {
+                const state = {
+                    timestamp: Date.now(),
+                    players: Array.from(this.currentPlayers.entries())
+                };
+                localStorage.setItem(LAST_PLAYER_STATE_KEY, JSON.stringify(state));
+            } catch (e) {
+                console.error('Failed to save last player state:', e);
+            }
+        }
+
+        calculatePopulationStats() {
+            const now = Date.now();
+            const oneHourAgo = now - (60 * 60 * 1000);
+            
+            // Get current population
+            currentPopulation = this.currentPlayers.size;
+            
+            // Find population from one hour ago
+            const oneHourAgoEntry = this.populationHistory
+                .filter(entry => entry.timestamp >= oneHourAgo - 300000) // 5 min buffer
+                .sort((a, b) => Math.abs(a.timestamp - oneHourAgo) - Math.abs(b.timestamp - oneHourAgo))[0];
+            
+            if (oneHourAgoEntry) {
+                lastHourChange = currentPopulation - oneHourAgoEntry.count;
+            } else {
+                lastHourChange = 0;
+            }
+            
+            // Simple prediction based on last hour trend
+            if (lastHourChange !== 0) {
+                // If we have a trend from the last hour, continue that trend
+                predictedNextHour = Math.max(0, Math.round(currentPopulation + lastHourChange));
+            } else {
+                // If no change in last hour, look at recent 10-minute trends
+                const tenMinutesAgo = now - (10 * 60 * 1000);
+                const recentEntry = this.populationHistory
+                    .filter(entry => entry.timestamp >= tenMinutesAgo - 60000) // 1 min buffer
+                    .sort((a, b) => Math.abs(a.timestamp - tenMinutesAgo) - Math.abs(b.timestamp - tenMinutesAgo))[0];
+                
+                if (recentEntry) {
+                    const recentChange = currentPopulation - recentEntry.count;
+                    // Extrapolate 10-minute change to 1-hour prediction (6x)
+                    const hourlyTrend = recentChange * 6;
+                    predictedNextHour = Math.max(0, Math.round(currentPopulation + hourlyTrend));
+                } else {
+                    // No trend data, predict same as current
+                    predictedNextHour = currentPopulation;
+                }
+            }
+        }
+
+        updatePopulationDisplay() {
+            const popDisplay = document.getElementById('population-stats');
+            if (!popDisplay) return;
+            
+            const changeColor = lastHourChange > 0 ? '#28a745' : lastHourChange < 0 ? '#dc3545' : '#6c757d';
+            const changeSymbol = lastHourChange > 0 ? '+' : '';
+            
+            popDisplay.innerHTML = `
+                <div style="background: rgba(111, 66, 193, 0.1); padding: 10px; border-radius: 5px; margin-bottom: 10px;">
+                    <div style="color: #6f42c1; font-weight: bold; font-size: 14px; margin-bottom: 5px;">
+                        Population Stats
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <div style="color: white; font-size: 18px; font-weight: bold;">
+                                ${currentPopulation} players
+                            </div>
+                            <div style="color: ${changeColor}; font-size: 12px;">
+                                ${changeSymbol}${lastHourChange} in the past hour
+                            </div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="color: #17a2b8; font-size: 12px;">
+                                Predicted next hour:
+                            </div>
+                            <div style="color: #17a2b8; font-size: 14px; font-weight: bold;">
+                                ${predictedNextHour} players
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        addToDatabase(playerId, playerName) {
+            const now = Date.now();
+            let needsUpdate = false;
+            
+            if (this.playerDatabase[playerId]) {
+                // Player exists, check for name change
+                const existing = this.playerDatabase[playerId];
+                if (existing.currentName !== playerName) {
+                    // Name changed
+                    existing.previousNames = existing.previousNames || [];
+                    if (!existing.previousNames.includes(existing.currentName)) {
+                        existing.previousNames.push(existing.currentName);
+                    }
+                    existing.currentName = playerName;
+                    existing.nameChanged = true;
+                    existing.lastNameChange = now;
+                    needsUpdate = true;
+                }
+                existing.lastSeen = now;
+            } else {
+                // New player
+                this.playerDatabase[playerId] = {
+                    id: playerId,
+                    currentName: playerName,
+                    originalName: playerName,
+                    firstSeen: now,
+                    lastSeen: now,
+                    nameChanged: false,
+                    previousNames: []
+                };
+                needsUpdate = true;
+            }
+            
+            // Only save and update display if there were significant changes
+            if (needsUpdate) {
+                this.savePlayerDatabase();
+                // Debounce database display updates
+                clearTimeout(this.databaseUpdateTimeout);
+                this.databaseUpdateTimeout = setTimeout(() => {
+                    this.updateDatabaseDisplay();
+                }, 1000);
+            }
+        }
+
+        updateDatabaseDisplay() {
+            const databaseDiv = document.getElementById('player-database-list');
+            if (!databaseDiv) return;
+
+            // Don't update if user is actively searching - preserve search results
+            if (activeDatabaseSearch && activeDatabaseSearch.length >= 2) {
+                return;
+            }
+
+            // Only show if database section is visible to save performance
+            const databaseSection = document.getElementById('player-database-list').parentElement;
+            if (databaseSection && databaseSection.style.display === 'none') return;
+
+            // Sort by online status first, then by last seen
+            const players = Object.values(this.playerDatabase)
+                .sort((a, b) => {
+                    const aOnline = this.currentPlayers.has(a.id);
+                    const bOnline = this.currentPlayers.has(b.id);
+                    
+                    // Online players first
+                    if (aOnline && !bOnline) return -1;
+                    if (!aOnline && bOnline) return 1;
+                    
+                    // Then by last seen
+                    return b.lastSeen - a.lastSeen;
+                }); // Show all players - no limit
+            
+            if (players.length === 0) {
+                databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players in database</div>';
+                return;
+            }
+
+            this.renderDatabasePlayers(players, databaseDiv);
+        }
+
+        renderDatabasePlayers(players, container) {
+            let databaseHTML = '';
+            players.forEach(player => {
+                const lastSeenTime = toRelativeTime(player.lastSeen);
+                const hasAlert = this.alerts[player.id];
+                const isSaved = this.savedPlayers[player.id];
+                const isOnline = this.currentPlayers.has(player.id);
+                
+                let nameDisplay = player.currentName;
+                if (player.nameChanged && player.previousNames.length > 0) {
+                    nameDisplay = `${player.currentName} (was: ${player.previousNames[player.previousNames.length - 1]})`;
+                }
+                
+                const onlineStatus = isOnline ? 
+                    '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
+                    '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
+                
+                databaseHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(111, 66, 193, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#6f42c1'};">
+                        <div style="flex: 1;">
+                            <div style="color: #6f42c1; font-weight: bold; font-size: 12px;">
+                                ${nameDisplay} ${onlineStatus}
+                                ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                                ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                            </div>
+                            <div style="opacity: 0.7; font-size: 10px;">
+                                ID: ${player.id} | Last seen: ${lastSeenTime}
+                            </div>
+                            ${player.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
+                        </div>
+                        <div style="display: flex; gap: 3px; flex-wrap: wrap;">
+                            <button onclick="window.open('https://www.battlemetrics.com/players/${player.id}', '_blank')" 
+                                    style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View Profile">
+                                Profile
+                            </button>
+                            <button onclick="togglePlayerAlert('${player.currentName}', '${player.id}')" 
+                                    style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
+                                ${hasAlert ? 'Remove' : 'Add Alert'}
+                            </button>
+                            <button onclick="savePlayer('${player.currentName}', '${player.id}')" 
+                                    style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
+                                ${isSaved ? 'Saved' : 'Save'}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = databaseHTML;
+        }
+
+        searchDatabase(query) {
+            if (!query || query.length < 2) return Object.values(this.playerDatabase);
+            
+            const lowerQuery = query.toLowerCase();
+            return Object.values(this.playerDatabase).filter(player => {
+                return player.currentName.toLowerCase().includes(lowerQuery) ||
+                       player.originalName.toLowerCase().includes(lowerQuery) ||
+                       player.id.includes(query) ||
+                       (player.previousNames && player.previousNames.some(name => 
+                           name.toLowerCase().includes(lowerQuery)
+                       ));
+            });
+        }
+
+        addAlert(playerName, playerId, alertType = 'both') {
+            this.alerts[playerId] = {
+                name: playerName,
+                type: alertType, // 'join', 'leave', 'both'
+                added: Date.now()
+            };
+            this.saveAlerts();
+        }
+
+        removeAlert(playerId) {
+            delete this.alerts[playerId];
+            this.saveAlerts();
+        }
+
+        logActivity(playerName, playerId, action) {
+            const entry = {
+                timestamp: Date.now(),
+                playerName,
+                playerId,
+                action, // 'joined' or 'left'
+                serverName: currentServerName,
+                time: new Date().toLocaleString()
+            };
+            this.activityLog.push(entry);
+            this.saveActivityLog();
+
+            // Check if we should alert for this player
+            const alert = this.alerts[playerId];
+            if (alert && (alert.type === 'both' || alert.type === action.replace('ed', ''))) {
+                this.showAlert(playerName, action);
+                this.addRecentAlert(playerName, playerId, action);
+                if (this.soundEnabled) {
+                    this.playAlertSound();
+                }
+            }
+
+            // Debounce activity display updates to reduce lag
+            clearTimeout(this.activityUpdateTimeout);
+            this.activityUpdateTimeout = setTimeout(() => {
+                this.updateActivityDisplay();
+            }, 500);
+        }
+
+        showAlert(playerName, action) {
+            const alertDiv = document.createElement('div');
+            alertDiv.style.cssText = `
+                position: fixed;
+                top: 20px;
+                left: 50%;
+                transform: translateX(-50%);
+                background: ${action === 'joined' ? '#28a745' : '#dc3545'};
+                color: white;
+                padding: 12px 20px;
+                border-radius: 8px;
+                z-index: 10001;
+                font-size: 14px;
+                font-weight: bold;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                animation: slideDown 0.3s ease-out;
+            `;
+            
+            alertDiv.innerHTML = `
+                <div>${playerName} ${action} the game</div>
+                <div style="font-size: 12px; opacity: 0.9; margin-top: 4px;">${toRelativeTime(Date.now())}</div>
+            `;
+
+            // Add CSS animation if not exists
+            if (!document.getElementById('alert-animations')) {
+                const style = document.createElement('style');
+                style.id = 'alert-animations';
+                style.textContent = `
+                    @keyframes slideDown {
+                        from { transform: translateX(-50%) translateY(-100%); opacity: 0; }
+                        to { transform: translateX(-50%) translateY(0); opacity: 1; }
+                    }
+                `;
+                document.head.appendChild(style);
+            }
+
+            document.body.appendChild(alertDiv);
+
+            setTimeout(() => {
+                alertDiv.style.animation = 'slideDown 0.3s ease-out reverse';
+                setTimeout(() => alertDiv.remove(), 300);
+            }, 4000);
+        }
+
+        async playAlertSound() {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // Resume audio context if suspended (required by modern browsers)
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+                
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
+                oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+                
+                oscillator.start(audioContext.currentTime);
+                oscillator.stop(audioContext.currentTime + 0.5);
+                
+                console.log('Alert sound played successfully');
+            } catch (e) {
+                console.log('Could not play alert sound:', e);
+                // Fallback: try to use a simple beep
+                try {
+                    const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT');
+                    audio.volume = 0.3;
+                    audio.play();
+                } catch (fallbackError) {
+                    console.log('Fallback sound also failed:', fallbackError);
+                }
+            }
+        }
+
+        startMonitoring() {
+            if (this.isMonitoring) return;
+            
+            this.isMonitoring = true;
+            
+            // Initial player list
+            this.updatePlayerList();
+            
+            // Initial population display
+            this.updatePopulationDisplay();
+            
+            // Monitor every 10 seconds to reduce load
+            monitoringInterval = setInterval(() => {
+                this.checkPlayerChanges();
+            }, 10000);
+            
+            console.log('Started monitoring server:', currentServerID);
+        }
+
+        stopMonitoring() {
+            this.isMonitoring = false;
+            if (monitoringInterval) {
+                clearInterval(monitoringInterval);
+                monitoringInterval = null;
+            }
+            console.log('Stopped monitoring');
+        }
+
+        updatePlayerList() {
+            try {
+                const playerRows = document.querySelectorAll('table tbody tr');
+                const newPlayerList = new Map();
+
+                playerRows.forEach(row => {
+                    const nameCell = row.querySelector('td:first-child a');
+                    if (nameCell) {
+                        const playerName = nameCell.textContent.trim();
+                        const playerLink = nameCell.href;
+                        const playerId = playerLink.split('/players/')[1]?.split('/')[0];
+                        
+                        if (playerId && playerName) {
+                            newPlayerList.set(playerId, {
+                                name: playerName,
+                                id: playerId,
+                                lastSeen: Date.now()
+                            });
+                            
+                            // Add to database
+                            this.addToDatabase(playerId, playerName);
+                        }
+                    }
+                });
+
+                // Check for changes
+                let comparisonList = lastPlayerList;
+                
+                // On first run, use last saved state if available
+                if (lastPlayerList.size === 0 && this.lastPlayerState.size > 0) {
+                    comparisonList = this.lastPlayerState;
+                    console.log('Using last saved player state for comparison');
+                }
+                
+                if (comparisonList.size > 0) {
+                    // Check for new joins
+                    newPlayerList.forEach((player, playerId) => {
+                        if (!comparisonList.has(playerId)) {
+                            this.logActivity(player.name, playerId, 'joined');
+                        }
+                    });
+
+                    // Check for leaves
+                    comparisonList.forEach((player, playerId) => {
+                        if (!newPlayerList.has(playerId)) {
+                            // Use player name from comparison list if available
+                            const playerName = player.name || player.playerName || `Player ${playerId}`;
+                            this.logActivity(playerName, playerId, 'left');
+                        }
+                    });
+                }
+
+                lastPlayerList = new Map(newPlayerList);
+                this.currentPlayers = new Map(newPlayerList);
+                
+                // Save current state for next page load
+                this.saveLastPlayerState();
+                
+                // Record population for tracking
+                this.recordPopulation(newPlayerList.size);
+                
+                // Update all displays when player status changes
+                this.updatePlayerDisplay();
+                this.updateAlertDisplay();
+                this.updateSavedPlayersDisplay();
+            } catch (e) {
+                console.error('Error updating player list:', e);
+            }
+        }
+
+        checkPlayerChanges() {
+            this.updatePlayerList();
+        }
+
+        updatePlayerDisplay() {
+            const playerListDiv = document.getElementById('current-players-list');
+            if (!playerListDiv) return;
+
+            if (this.currentPlayers.size === 0) {
+                playerListDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players online</div>';
+                return;
+            }
+
+            let playersHTML = '';
+            this.currentPlayers.forEach((player, playerId) => {
+                const isAlerted = this.alerts[playerId];
+                playersHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1);">
+                        <div style="flex: 1;">
+                            <a href="https://www.battlemetrics.com/players/${playerId}" target="_blank" style="color: #17a2b8; text-decoration: none;">
+                                ${player.name}
+                            </a>
+                            ${isAlerted ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                        </div>
+                        <div style="display: flex; gap: 5px;">
+                            <button onclick="togglePlayerAlert('${player.name}', '${playerId}')" 
+                                    style="background: ${isAlerted ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                                    title="${isAlerted ? 'Remove Alert' : 'Add Alert'}">
+                                ${isAlerted ? 'Remove' : 'Add Alert'}
+                            </button>
+                            <button onclick="savePlayer('${player.name}', '${playerId}')" 
+                                    style="background: #6c757d; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                                    title="Save Player">
+                                Save
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            playerListDiv.innerHTML = playersHTML;
+        }
+
+        updateActivityDisplay() {
+            const activityDiv = document.getElementById('recent-activity-list');
+            if (!activityDiv) return;
+
+            // Check if there's an active filter and apply it
+            const filterSelect = document.getElementById('activity-filter');
+            if (filterSelect && filterSelect.value !== 'all') {
+                // Use the filter function to maintain current filter
+                window.filterActivity(filterSelect.value);
+                return;
+            }
+
+            // Default behavior - show all activity
+            const recentActivity = this.activityLog.slice(-100).reverse();
+            
+            if (recentActivity.length === 0) {
+                activityDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No recent activity</div>';
+                return;
+            }
+
+            let activityHTML = '';
+            recentActivity.forEach(entry => {
+                const timeAgo = toRelativeTime(entry.timestamp);
+                const actionColor = entry.action === 'joined' ? '#28a745' : '#dc3545';
+                const hasAlert = this.alerts[entry.playerId];
+                const isSaved = this.savedPlayers[entry.playerId];
+                
+                activityHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
+                        <div style="flex: 1;">
+                            <div style="color: ${actionColor}; font-weight: bold;">
+                                ${entry.playerName} ${entry.action} the game
+                                ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                                ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                            </div>
+                            <div style="opacity: 0.7; font-size: 11px;">${timeAgo} - ${entry.time} - ID: ${entry.playerId}</div>
+                        </div>
+                        <div style="display: flex; gap: 3px;">
+                            <button onclick="window.open('https://www.battlemetrics.com/players/${entry.playerId}', '_blank')" 
+                                    style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View Profile">
+                                Profile
+                            </button>
+                            <button onclick="togglePlayerAlert('${entry.playerName}', '${entry.playerId}')" 
+                                    style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
+                                ${hasAlert ? 'Remove' : 'Add Alert'}
+                            </button>
+                            <button onclick="savePlayer('${entry.playerName}', '${entry.playerId}')" 
+                                    style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
+                                ${isSaved ? 'Saved' : 'Save'}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            activityDiv.innerHTML = activityHTML;
+        }
+
+        updateAlertDisplay() {
+            const alertDiv = document.getElementById('alert-players-list');
+            if (!alertDiv) return;
+
+            const alertedPlayers = Object.keys(this.alerts);
+            
+            if (alertedPlayers.length === 0) {
+                alertDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players with alerts</div>';
+                return;
+            }
+
+            let alertHTML = '';
+            alertedPlayers.forEach(playerId => {
+                const alert = this.alerts[playerId];
+                const addedDate = new Date(alert.added).toLocaleDateString();
+                const isOnline = this.currentPlayers.has(playerId);
+                const dbPlayer = this.playerDatabase[playerId];
+                const isSaved = this.savedPlayers[playerId];
+                
+                // Get current name and check for name changes
+                let displayName = alert.name;
+                let nameChangeInfo = '';
+                
+                if (dbPlayer) {
+                    displayName = dbPlayer.currentName;
+                    if (dbPlayer.nameChanged && dbPlayer.previousNames.length > 0) {
+                        const originalAlertName = alert.name;
+                        if (originalAlertName !== dbPlayer.currentName) {
+                            nameChangeInfo = ` (was: ${originalAlertName})`;
+                        }
+                    }
+                }
+                
+                const onlineStatus = isOnline ? 
+                    '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
+                    '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
+                
+                alertHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(255, 193, 7, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#ffc107'};">
+                        <div style="flex: 1;">
+                            <div style="color: #ffc107; font-weight: bold; font-size: 12px;">
+                                <a href="https://www.battlemetrics.com/players/${playerId}" target="_blank" style="color: #ffc107; text-decoration: none;">
+                                    ${displayName}${nameChangeInfo}
+                                </a>
+                                ${onlineStatus}
+                                ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                            </div>
+                            <div style="opacity: 0.7; font-size: 10px;">
+                                Added: ${addedDate} | ID: ${playerId}
+                            </div>
+                            ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
+                        </div>
+                        <div style="display: flex; gap: 3px;">
+                            <button onclick="window.open('https://www.battlemetrics.com/players/${playerId}', '_blank')" 
+                                    style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View Profile">
+                                Profile
+                            </button>
+                            <button onclick="savePlayer('${displayName}', '${playerId}')" 
+                                    style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
+                                ${isSaved ? 'Saved' : 'Save'}
+                            </button>
+                            <button onclick="togglePlayerAlert('${displayName}', '${playerId}')" 
+                                    style="background: #dc3545; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="Remove Alert">
+                                Remove
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            alertDiv.innerHTML = alertHTML;
+        }
+
+        updateSavedPlayersDisplay() {
+            const savedDiv = document.getElementById('saved-players-list');
+            if (!savedDiv) return;
+
+            const savedPlayers = Object.keys(this.savedPlayers);
+            
+            if (savedPlayers.length === 0) {
+                savedDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No saved players</div>';
+                return;
+            }
+
+            let savedHTML = '';
+            savedPlayers.forEach(playerId => {
+                const saved = this.savedPlayers[playerId];
+                const savedDate = new Date(saved.saved).toLocaleDateString();
+                const hasAlert = this.alerts[playerId];
+                const isOnline = this.currentPlayers.has(playerId);
+                const dbPlayer = this.playerDatabase[playerId];
+                
+                // Get current name and check for name changes
+                let displayName = saved.name;
+                let nameChangeInfo = '';
+                
+                if (dbPlayer) {
+                    displayName = dbPlayer.currentName;
+                    if (dbPlayer.nameChanged && dbPlayer.previousNames.length > 0) {
+                        const originalSavedName = saved.name;
+                        if (originalSavedName !== dbPlayer.currentName) {
+                            nameChangeInfo = ` (was: ${originalSavedName})`;
+                        }
+                    }
+                }
+                
+                const onlineStatus = isOnline ? 
+                    '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
+                    '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
+                
+                savedHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(108, 117, 125, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#6c757d'};">
+                        <div style="flex: 1;">
+                            <div style="color: #6c757d; font-weight: bold; font-size: 12px;">
+                                <a href="https://www.battlemetrics.com/players/${playerId}" target="_blank" style="color: #6c757d; text-decoration: none;">
+                                    ${displayName}${nameChangeInfo}
+                                </a>
+                                ${onlineStatus}
+                                ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                            </div>
+                            <div style="opacity: 0.7; font-size: 10px;">
+                                Saved: ${savedDate} | ID: ${playerId}
+                            </div>
+                            ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
+                        </div>
+                        <div style="display: flex; gap: 3px;">
+                            <button onclick="window.open('https://www.battlemetrics.com/players/${playerId}', '_blank')" 
+                                    style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View Profile">
+                                Profile
+                            </button>
+                            <button onclick="togglePlayerAlert('${displayName}', '${playerId}')" 
+                                    style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
+                                ${hasAlert ? 'Remove' : 'Add Alert'}
+                            </button>
+                            <button onclick="removeSavedPlayer('${playerId}')" 
+                                    style="background: #6c757d; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="Remove from Saved">
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            savedDiv.innerHTML = savedHTML;
+        }
+
+        updateRecentAlertsDisplay() {
+            const alertsDiv = document.getElementById('recent-alerts-list');
+            if (!alertsDiv) return;
+
+            // Clean old alerts first
+            this.clearOldAlerts();
+            
+            // Check if we need to reorder sections based on unacknowledged alerts
+            this.reorderSectionsIfNeeded();
+
+            const recentAlerts = Object.keys(this.recentAlerts)
+                .map(id => ({ id, ...this.recentAlerts[id] }))
+                .sort((a, b) => b.timestamp - a.timestamp);
+            
+            if (recentAlerts.length === 0) {
+                alertsDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No recent alerts</div>';
+                return;
+            }
+
+            let alertsHTML = '';
+            recentAlerts.forEach(alert => {
+                const timeAgo = toRelativeTime(alert.timestamp);
+                const actionColor = alert.action === 'joined' ? '#28a745' : '#dc3545';
+                const bgColor = alert.acknowledged ? 'rgba(108, 117, 125, 0.1)' : 'rgba(220, 53, 69, 0.1)';
+                const dbPlayer = this.playerDatabase[alert.playerId];
+                
+                // Get current name and check for name changes
+                let displayName = alert.playerName;
+                let nameChangeInfo = '';
+                
+                if (dbPlayer) {
+                    displayName = dbPlayer.currentName;
+                    if (dbPlayer.nameChanged && dbPlayer.previousNames.length > 0) {
+                        // Show the most recent previous name if current name is different from any previous name
+                        const mostRecentPreviousName = dbPlayer.previousNames[dbPlayer.previousNames.length - 1];
+                        
+                        // Check if the alert name is different from current name OR if we should show previous name
+                        if (alert.playerName !== dbPlayer.currentName) {
+                            nameChangeInfo = ` (was: ${alert.playerName})`;
+                        } else if (mostRecentPreviousName && mostRecentPreviousName !== dbPlayer.currentName) {
+                            nameChangeInfo = ` (was: ${mostRecentPreviousName})`;
+                        }
+                    }
+                }
+                
+                alertsHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: ${bgColor}; border-left: 3px solid ${actionColor};">
+                        <div style="flex: 1;">
+                            <div style="color: ${actionColor}; font-weight: bold; font-size: 12px;">
+                                ${displayName}${nameChangeInfo} ${alert.action} the game
+                            </div>
+                            <div style="opacity: 0.7; font-size: 10px;">${timeAgo} | ID: ${alert.playerId}</div>
+                            ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
+                            ${alert.acknowledged ? '<div style="color: #28a745; font-size: 10px;">✓ Acknowledged</div>' : '<div style="color: #ffc107; font-size: 10px;">⚠ Needs acknowledgment</div>'}
+                        </div>
+                        <div style="display: flex; gap: 3px;">
+                            ${!alert.acknowledged ? `
+                                <button onclick="acknowledgeRecentAlert('${alert.id}')" 
+                                        style="background: #28a745; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                        title="Acknowledge Alert">
+                                    OK
+                                </button>
+                            ` : ''}
+                            <button onclick="window.open('https://www.battlemetrics.com/players/${alert.playerId}', '_blank')" 
+                                    style="background: #17a2b8; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View Profile">
+                                Profile
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            alertsDiv.innerHTML = alertsHTML;
+        }
+
+        reorderSectionsIfNeeded() {
+            const unacknowledged = Object.values(this.recentAlerts).filter(alert => !alert.acknowledged);
+            const hasUnacknowledgedAlerts = unacknowledged.length > 0;
+            
+            const recentAlertsSection = document.getElementById('recent-alerts-section');
+            const populationStats = document.getElementById('population-stats');
+            const playerSearchSection = populationStats ? populationStats.nextElementSibling : null;
+            
+            if (!recentAlertsSection) return;
+            
+            // Check if Recent Alerts is currently at the top (right after population stats)
+            const currentlyAtTop = playerSearchSection && recentAlertsSection.nextElementSibling === playerSearchSection;
+            
+            if (hasUnacknowledgedAlerts && !currentlyAtTop) {
+                // Move Recent Alerts to top (after population stats, before player search)
+                if (populationStats && playerSearchSection) {
+                    populationStats.insertAdjacentElement('afterend', recentAlertsSection);
+                }
+                
+                // Make it more prominent with pulsing effect
+                recentAlertsSection.style.border = '2px solid #dc3545';
+                recentAlertsSection.style.boxShadow = '0 0 15px rgba(220, 53, 69, 0.5)';
+                recentAlertsSection.style.animation = 'pulse 2s infinite';
+                
+                // Add pulse animation if not exists
+                if (!document.getElementById('alert-pulse-animation')) {
+                    const style = document.createElement('style');
+                    style.id = 'alert-pulse-animation';
+                    style.textContent = `
+                        @keyframes pulse {
+                            0% { box-shadow: 0 0 15px rgba(220, 53, 69, 0.5); }
+                            50% { box-shadow: 0 0 25px rgba(220, 53, 69, 0.8); }
+                            100% { box-shadow: 0 0 15px rgba(220, 53, 69, 0.5); }
+                        }
+                    `;
+                    document.head.appendChild(style);
+                }
+                
+                // Auto-expand if collapsed
+                const alertsList = document.getElementById('recent-alerts-list');
+                const toggle = document.getElementById('recentalerts-toggle');
+                if (alertsList && toggle && alertsList.style.display === 'none') {
+                    alertsList.style.display = 'block';
+                    toggle.textContent = '▼';
+                }
+                
+                console.log('Moved Recent Alerts to top due to unacknowledged alerts');
+                
+            } else if (!hasUnacknowledgedAlerts && currentlyAtTop) {
+                // Move Recent Alerts back to original position (after Player Database)
+                const playerDatabaseSection = document.getElementById('player-database-section');
+                if (playerDatabaseSection) {
+                    playerDatabaseSection.insertAdjacentElement('afterend', recentAlertsSection);
+                }
+                
+                // Remove prominence styling
+                recentAlertsSection.style.border = '1px solid #dc3545';
+                recentAlertsSection.style.boxShadow = 'none';
+                recentAlertsSection.style.animation = 'none';
+                
+                console.log('Moved Recent Alerts back to original position');
+            }
+        }
+
+        searchPlayers(query) {
+            const results = [];
+            this.currentPlayers.forEach((player, playerId) => {
+                if (player.name.toLowerCase().includes(query.toLowerCase())) {
+                    results.push(player);
+                }
+            });
+            return results;
+        }
+
+        exportActivityLog() {
+            const csv = ['Timestamp,Player Name,Player ID,Action,Server Name'];
+            this.activityLog.forEach(entry => {
+                csv.push(`"${entry.time}","${entry.playerName}","${entry.playerId}","${entry.action}","${entry.serverName}"`);
+            });
+            
+            const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `server_activity_${new Date().toISOString().split('T')[0]}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        clearActivityLog() {
+            this.activityLog = [];
+            this.saveActivityLog();
+            this.updateActivityDisplay();
+        }
+    }
+
+    // Create Toggle Button
+    const createToggleButton = () => {
+        const existingToggleBtn = document.getElementById(TOGGLE_BUTTON_ID);
+        if (existingToggleBtn) existingToggleBtn.remove();
+
+        const toggleBtn = document.createElement("button");
+        toggleBtn.id = TOGGLE_BUTTON_ID;
+        toggleBtn.onclick = () => {
+            const currentlyVisible = isMenuVisible();
+            setMenuVisibility(!currentlyVisible);
+        };
+
+        Object.assign(toggleBtn.style, {
+            position: "fixed",
+            top: "20px",
+            right: "20px",
+            zIndex: "10000",
+            padding: "8px 12px",
+            backgroundColor: "#6c757d",
+            color: "#fff",
+            border: "none",
+            borderRadius: "5px",
+            cursor: "pointer",
+            fontSize: "14px",
+            fontWeight: "bold"
+        });
+
+        document.body.appendChild(toggleBtn);
+        updateToggleButton();
+    };
+
+    // Create Server Monitor UI
+    const createServerMonitor = () => {
+        const existingMonitor = document.getElementById(SERVER_MONITOR_ID);
+        if (existingMonitor) existingMonitor.remove();
+
+        const monitor = document.createElement('div');
+        monitor.id = SERVER_MONITOR_ID;
+        
+        Object.assign(monitor.style, {
+            position: "fixed",
+            top: "70px",
+            right: "20px",
+            backgroundColor: "#2c3e50",
+            color: "#fff",
+            padding: "20px",
+            borderRadius: "10px",
+            zIndex: "9999",
+            fontSize: "14px",
+            maxWidth: "450px",
+            maxHeight: "80vh",
+            overflowY: "auto",
+            boxShadow: "0 8px 25px rgba(0,0,0,0.3)",
+            border: "1px solid #34495e",
+            lineHeight: "1.4"
+        });
+
+        monitor.innerHTML = `
+            <div style="border-bottom: 2px solid rgba(255,255,255,0.2); padding-bottom: 12px; margin-bottom: 15px;">
+                <div style="font-size: 18px; font-weight: bold; color: #fff; margin-bottom: 8px;">
+                    Server Monitor
+                </div>
+                <div style="font-size: 12px; opacity: 0.9;">
+                    Real-time player tracking & alerts
+                </div>
+                <div style="font-size: 11px; opacity: 0.7; margin-top: 4px; color: #17a2b8;">
+                    Server ID: <span id="current-server-id">${currentServerID || 'Loading...'}</span>
+                </div>
+            </div>
+
+            <!-- Population Stats -->
+            <div id="population-stats">
+                <!-- Population stats will be populated by updatePopulationDisplay() -->
+            </div>
+
+            <!-- Player Search -->
+            <div style="background: rgba(0, 123, 255, 0.2); border: 1px solid #007bff; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #007bff; margin-bottom: 8px;">
+                    Player Search
+                </div>
+                <div style="display: flex; gap: 5px; align-items: center;">
+                    <input type="text" id="player-search" placeholder="Search current players..." 
+                           style="flex: 1; padding: 5px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 12px;"
+                           oninput="handlePlayerSearch(this.value)"
+                           onblur="setTimeout(() => { if (!this.value) { activePlayerSearch = ''; } }, 200)">
+                    <button onclick="clearPlayerSearch()" 
+                            style="background: #6c757d; color: white; border: none; padding: 5px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                            title="Clear Search">
+                        ✕
+                    </button>
+                </div>
+                <div id="search-results" style="margin-top: 8px; max-height: 150px; overflow-y: auto;"></div>
+            </div>
+
+            <!-- Current Online Players -->
+            <div style="background: rgba(40, 167, 69, 0.2); border: 1px solid #28a745; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #28a745; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('current-players')">
+                    Current Online Players (<span id="player-count">0</span>) <span id="players-toggle">▼</span>
+                </div>
+                <div id="current-players-list" style="max-height: 200px; overflow-y: auto;">
+                    Loading players...
+                </div>
+            </div>
+
+            <!-- Alert Players -->
+            <div style="background: rgba(255, 193, 7, 0.2); border: 1px solid #ffc107; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #ffc107; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('alert-players')">
+                    Alert Players (<span id="alert-count">0</span>) <span id="alertplayers-toggle">▼</span>
+                </div>
+                <div id="alert-players-list" style="max-height: 200px; overflow-y: auto;">
+                    No players with alerts
+                </div>
+            </div>
+
+            <!-- Saved Players -->
+            <div style="background: rgba(108, 117, 125, 0.2); border: 1px solid #6c757d; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #6c757d; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('saved-players')">
+                    Saved Players (<span id="saved-count">0</span>) <span id="savedplayers-toggle">▼</span>
+                </div>
+                <div id="saved-players-list" style="max-height: 200px; overflow-y: auto;">
+                    No saved players
+                </div>
+            </div>
+
+            <!-- Player Database -->
+            <div id="player-database-section" style="background: rgba(111, 66, 193, 0.2); border: 1px solid #6f42c1; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #6f42c1; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('player-database')">
+                    Player Database (<span id="database-count">0</span>) <span id="playerdatabase-toggle">▶</span>
+                </div>
+                <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center;">
+                    <input type="text" id="database-search" placeholder="Search database by name or ID..." 
+                           style="flex: 1; padding: 5px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 12px;"
+                           oninput="handleDatabaseSearch(this.value)"
+                           onblur="setTimeout(() => { if (!this.value) { activeDatabaseSearch = ''; if (serverMonitor) serverMonitor.updateDatabaseDisplay(); } }, 200)">
+                    <button onclick="clearDatabaseSearch()" 
+                            style="background: #6c757d; color: white; border: none; padding: 5px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                            title="Clear Search">
+                        ✕
+                    </button>
+                </div>
+                <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center;">
+                    <select id="database-filter" onchange="filterDatabase(this.value)" 
+                            style="padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
+                        <option value="all">All Players</option>
+                        <option value="online">Online Only</option>
+                        <option value="offline">Offline Only</option>
+                        <option value="recent-left">Recently Left (Last Hour)</option>
+                        <option value="name-changed">Name Changed</option>
+                    </select>
+                    <button onclick="clearDatabaseFilter()" 
+                            style="background: #6c757d; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                            title="Clear Filter">
+                        Clear
+                    </button>
+                </div>
+                <div id="player-database-list" style="max-height: 250px; overflow-y: auto; display: none;">
+                    No players in database
+                </div>
+            </div>
+
+            <!-- Recent Alerts -->
+            <div id="recent-alerts-section" style="background: rgba(220, 53, 69, 0.2); border: 1px solid #dc3545; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #dc3545; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('recent-alerts')">
+                    Recent Alerts (<span id="recent-alerts-count">0</span>) <span id="recentalerts-toggle">▼</span>
+                </div>
+                <div id="recent-alerts-list" style="max-height: 200px; overflow-y: auto;">
+                    No recent alerts
+                </div>
+            </div>
+
+            <!-- Recent Activity -->
+            <div style="background: rgba(23, 162, 184, 0.2); border: 1px solid #17a2b8; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #17a2b8; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('recent-activity')">
+                    All Activity (<span id="activity-count">0</span>) <span id="activity-toggle">▶</span>
+                </div>
+                <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center; display: none;" id="activity-filters">
+                    <select id="activity-filter" onchange="filterActivity(this.value)" 
+                            style="padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
+                        <option value="all">All Activity</option>
+                        <option value="joined">Joined Only</option>
+                        <option value="left">Left Only</option>
+                        <option value="recent">Most Recent (Last Hour)</option>
+                    </select>
+                    <button onclick="clearActivityFilter()" 
+                            style="background: #6c757d; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                            title="Clear Filter">
+                        Clear
+                    </button>
+                </div>
+                <div id="recent-activity-list" style="max-height: 300px; overflow-y: auto; display: none;">
+                    No recent activity
+                </div>
+            </div>
+
+            <!-- Settings -->
+            <div style="background: rgba(220, 53, 69, 0.2); border: 1px solid #dc3545; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #dc3545; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('alert-settings')">
+                    Settings <span id="alerts-toggle">▶</span>
+                </div>
+                <div id="alert-settings-content" style="display: none;">
+                    <div style="margin-bottom: 10px;">
+                        <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
+                            <input type="checkbox" id="sound-alerts" ${serverMonitor?.soundEnabled ? 'checked' : ''} 
+                                   onchange="toggleSoundAlerts(this.checked)" style="margin-right: 8px;">
+                            Enable sound alerts
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="repeat-alerts" ${serverMonitor?.settings.repeatAlerts !== false ? 'checked' : ''} 
+                                   onchange="toggleRepeatAlerts(this.checked)" style="margin-right: 8px;">
+                            Repeat alert sounds (every 1 min)
+                        </label>
+                        <button onclick="testSound()" 
+                                style="background: #28a745; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-top: 5px;">
+                            Test Sound
+                        </button>
+                    </div>
+                    <div style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px;">
+                        <button onclick="exportCurrentServer()" 
+                                style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Export Current
+                        </button>
+                        <button onclick="exportAllServers()" 
+                                style="background: #007bff; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Export All Data
+                        </button>
+                        <button onclick="clearLog()" 
+                                style="background: #ffc107; color: black; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Clear Log
+                        </button>
+                        <button onclick="toggleMonitoring()" id="monitoring-btn"
+                                style="background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Stop Monitoring
+                        </button>
+                    </div>
+                    <div style="display: flex; gap: 5px; flex-wrap: wrap;">
+                        <button onclick="resetCurrentServer()" 
+                                style="background: #fd7e14; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Reset Current Server
+                        </button>
+                        <button onclick="resetAllData()" 
+                                style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Reset All Servers
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(monitor);
+        updateUIVisibility();
+    };
+
+    // Global functions for UI interaction
+    window.toggleSection = (sectionId) => {
+        const content = document.getElementById(`${sectionId}-list`) || document.getElementById(`${sectionId}-content`);
+        let toggle;
+        
+        // Handle different toggle ID patterns
+        if (sectionId === 'recent-activity') {
+            toggle = document.getElementById('activity-toggle');
+        } else if (sectionId === 'player-database') {
+            toggle = document.getElementById('playerdatabase-toggle');
+        } else if (sectionId === 'current-players') {
+            toggle = document.getElementById('players-toggle');
+        } else if (sectionId === 'alert-settings') {
+            toggle = document.getElementById('alerts-toggle');
+        } else {
+            toggle = document.getElementById(`${sectionId.replace('-', '')}-toggle`);
+        }
+        
+        if (content && toggle) {
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                toggle.textContent = '▼';
+                
+                // Show filters when section is expanded
+                if (sectionId === 'recent-activity') {
+                    const filters = document.getElementById('activity-filters');
+                    if (filters) filters.style.display = 'flex';
+                }
+            } else {
+                content.style.display = 'none';
+                toggle.textContent = '▶';
+                
+                // Hide filters when section is collapsed
+                if (sectionId === 'recent-activity') {
+                    const filters = document.getElementById('activity-filters');
+                    if (filters) filters.style.display = 'none';
+                }
+            }
+        }
+    };
+
+    window.handlePlayerSearch = (query) => {
+        const resultsDiv = document.getElementById('search-results');
+        if (!resultsDiv || !serverMonitor) return;
+
+        // Track active search state
+        activePlayerSearch = query;
+
+        if (query.length < 2) {
+            activePlayerSearch = '';
+            resultsDiv.innerHTML = '';
+            return;
+        }
+
+        // Search both current players and database
+        const currentResults = serverMonitor.searchPlayers(query);
+        const databaseResults = serverMonitor.searchDatabase(query);
+        
+        // Combine results, prioritizing current players and avoiding duplicates
+        const allResults = [];
+        const seenIds = new Set();
+        
+        // Add current players first (they're online)
+        currentResults.forEach(player => {
+            allResults.push({
+                ...player,
+                isOnline: true,
+                source: 'current'
+            });
+            seenIds.add(player.id);
+        });
+        
+        // Add database players that aren't already in current players
+        databaseResults.forEach(player => {
+            if (!seenIds.has(player.id)) {
+                allResults.push({
+                    ...player,
+                    name: player.currentName,
+                    isOnline: false,
+                    source: 'database'
+                });
+                seenIds.add(player.id);
+            }
+        });
+        
+        if (allResults.length === 0) {
+            resultsDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic; font-size: 11px;">No players found</div>';
+            return;
+        }
+
+        // Sort by online status first, then by name
+        allResults.sort((a, b) => {
+            if (a.isOnline && !b.isOnline) return -1;
+            if (!a.isOnline && b.isOnline) return 1;
+            return a.name.localeCompare(b.name);
+        });
+
+        let resultsHTML = '';
+        allResults.forEach(player => {
+            const isAlerted = serverMonitor.alerts[player.id];
+            const isSaved = serverMonitor.savedPlayers[player.id];
+            
+            const onlineStatus = player.isOnline ? 
+                '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
+                '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
+            
+            let nameDisplay = player.name;
+            if (player.source === 'database' && player.nameChanged && player.previousNames && player.previousNames.length > 0) {
+                nameDisplay = `${player.name} (was: ${player.previousNames[player.previousNames.length - 1]})`;
+            }
+            
+            resultsHTML += `
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); border-left: 3px solid ${player.isOnline ? '#28a745' : '#007bff'}; font-size: 11px;">
+                    <div style="flex: 1; padding-left: 8px;">
+                        <div>
+                            <span style="color: #17a2b8;">${nameDisplay}</span>
+                            ${onlineStatus}
+                            ${isAlerted ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                            ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                        </div>
+                        ${player.source === 'database' ? `<div style="opacity: 0.7; font-size: 10px;">ID: ${player.id} | Last seen: ${toRelativeTime(player.lastSeen)}</div>` : ''}
+                    </div>
+                    <div style="display: flex; gap: 3px;">
+                        <button onclick="window.open('https://www.battlemetrics.com/players/${player.id}', '_blank')" 
+                                style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;"
+                                title="View Profile">
+                            Profile
+                        </button>
+                        <button onclick="togglePlayerAlert('${player.name}', '${player.id}')" 
+                                style="background: ${isAlerted ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;"
+                                title="${isAlerted ? 'Remove Alert' : 'Add Alert'}">
+                            ${isAlerted ? 'Remove' : 'Add Alert'}
+                        </button>
+                        <button onclick="savePlayer('${player.name}', '${player.id}')" 
+                                style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;"
+                                title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
+                            ${isSaved ? 'Saved' : 'Save'}
+                        </button>
+                    </div>
+                </div>
+            `;
+        });
+
+        resultsDiv.innerHTML = resultsHTML;
+    };
+
+    window.togglePlayerAlert = (playerName, playerId) => {
+        if (!serverMonitor) return;
+        
+        const isAlerted = serverMonitor.alerts[playerId];
+        if (isAlerted) {
+            serverMonitor.removeAlert(playerId);
+        } else {
+            serverMonitor.addAlert(playerName, playerId, 'both');
+        }
+        
+        // Refresh search results to update button states
+        const searchInput = document.getElementById('player-search');
+        if (searchInput && searchInput.value.length >= 2) {
+            handlePlayerSearch(searchInput.value);
+        }
+        
+        // Update player display if needed
+        serverMonitor.updatePlayerDisplay();
+        
+        // Update displays with debouncing
+        clearTimeout(serverMonitor.alertUpdateTimeout);
+        serverMonitor.alertUpdateTimeout = setTimeout(() => {
+            serverMonitor.updateAlertDisplay();
+        }, 300);
+        
+        clearTimeout(serverMonitor.savedUpdateTimeout);
+        serverMonitor.savedUpdateTimeout = setTimeout(() => {
+            serverMonitor.updateSavedPlayersDisplay();
+        }, 300);
+    };
+
+    window.acknowledgeRecentAlert = (alertId) => {
+        if (serverMonitor) {
+            serverMonitor.acknowledgeAlert(alertId);
+        }
+    };
+
+    window.handleDatabaseSearch = (query) => {
+        if (!serverMonitor) return;
+        
+        const databaseDiv = document.getElementById('player-database-list');
+        if (!databaseDiv) return;
+
+        // Track active database search state
+        activeDatabaseSearch = query;
+
+        // Show the database list when user starts searching
+        if (query.length >= 2 && databaseDiv.style.display === 'none') {
+            databaseDiv.style.display = 'block';
+            const toggle = document.getElementById('playerdatabase-toggle');
+            if (toggle) toggle.textContent = '▼';
+        }
+
+        const results = serverMonitor.searchDatabase(query);
+        const sortedResults = results.sort((a, b) => b.lastSeen - a.lastSeen);
+        
+        if (query.length < 2) {
+            activeDatabaseSearch = '';
+            databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">Type 2+ characters to search</div>';
+            return;
+        }
+        
+        if (sortedResults.length === 0) {
+            databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players found</div>';
+            return;
+        }
+
+        serverMonitor.renderDatabasePlayers(sortedResults, databaseDiv);
+    };
+
+    window.clearPlayerSearch = () => {
+        const searchInput = document.getElementById('player-search');
+        const resultsDiv = document.getElementById('search-results');
+        if (searchInput) {
+            searchInput.value = '';
+            activePlayerSearch = '';
+        }
+        if (resultsDiv) {
+            resultsDiv.innerHTML = '';
+        }
+    };
+
+    window.clearDatabaseSearch = () => {
+        const searchInput = document.getElementById('database-search');
+        if (searchInput) {
+            searchInput.value = '';
+            activeDatabaseSearch = '';
+        }
+        if (serverMonitor) {
+            serverMonitor.updateDatabaseDisplay();
+        }
+    };
+
+    window.toggleSoundAlerts = (enabled) => {
+        if (serverMonitor) {
+            serverMonitor.soundEnabled = enabled;
+            serverMonitor.settings.soundEnabled = enabled;
+            serverMonitor.saveSettings();
+        }
+    };
+
+    window.toggleRepeatAlerts = (enabled) => {
+        if (serverMonitor) {
+            serverMonitor.settings.repeatAlerts = enabled;
+            serverMonitor.saveSettings();
+            
+            if (!enabled) {
+                serverMonitor.stopAlertReminders();
+            } else {
+                // Check if there are unacknowledged alerts to start reminders
+                const unacknowledged = Object.values(serverMonitor.recentAlerts).filter(alert => !alert.acknowledged);
+                if (unacknowledged.length > 0) {
+                    serverMonitor.startAlertReminders();
+                }
+            }
+        }
+    };
+
+    window.toggleMonitoring = () => {
+        const btn = document.getElementById('monitoring-btn');
+        if (!serverMonitor || !btn) return;
+
+        if (serverMonitor.isMonitoring) {
+            serverMonitor.stopMonitoring();
+            btn.textContent = 'Start Monitoring';
+            btn.style.background = '#28a745';
+        } else {
+            serverMonitor.startMonitoring();
+            btn.textContent = 'Stop Monitoring';
+            btn.style.background = '#dc3545';
+        }
+    };
+
+    window.exportLog = () => {
+        if (serverMonitor) {
+            serverMonitor.exportActivityLog();
+        }
+    };
+
+    window.clearLog = () => {
+        if (serverMonitor && confirm('Are you sure you want to clear the activity log?')) {
+            serverMonitor.clearActivityLog();
+        }
+    };
+
+    window.resetCurrentServer = () => {
+        if (confirm('Are you sure you want to reset ALL data for THIS SERVER? This will clear:\n\n• All player alerts\n• Activity log\n• Settings\n• Saved players\n• Recent alerts\n• Player database\n• Population history\n\nThis action cannot be undone!')) {
+            // Clear all server-specific localStorage data
+            localStorage.removeItem(ALERTS_KEY);
+            localStorage.removeItem(ACTIVITY_LOG_KEY);
+            localStorage.removeItem(ALERT_SETTINGS_KEY);
+            localStorage.removeItem(SAVED_PLAYERS_KEY);
+            localStorage.removeItem(RECENT_ALERTS_KEY);
+            localStorage.removeItem(PLAYER_DATABASE_KEY);
+            localStorage.removeItem(POPULATION_HISTORY_KEY);
+            localStorage.removeItem(LAST_PLAYER_STATE_KEY);
+            
+            // Reset serverMonitor if it exists
+            if (serverMonitor) {
+                serverMonitor.alerts = {};
+                serverMonitor.activityLog = [];
+                serverMonitor.settings = {};
+                serverMonitor.savedPlayers = {};
+                serverMonitor.recentAlerts = {};
+                serverMonitor.playerDatabase = {};
+                serverMonitor.populationHistory = [];
+                serverMonitor.lastPlayerState = new Map();
+                serverMonitor.soundEnabled = true;
+                
+                // Update displays
+                serverMonitor.updatePlayerDisplay();
+                serverMonitor.updateActivityDisplay();
+                serverMonitor.updateAlertDisplay();
+                serverMonitor.updateSavedPlayersDisplay();
+                serverMonitor.updateRecentAlertsDisplay();
+                serverMonitor.updateDatabaseDisplay();
+                serverMonitor.updatePopulationDisplay();
+                serverMonitor.stopAlertReminders();
+                
+                // Reset sound checkboxes
+                const soundCheckbox = document.getElementById('sound-alerts');
+                const repeatCheckbox = document.getElementById('repeat-alerts');
+                if (soundCheckbox) {
+                    soundCheckbox.checked = true;
+                }
+                if (repeatCheckbox) {
+                    repeatCheckbox.checked = true;
+                }
+            }
+            
+            alert('Current server data has been reset successfully!');
+        }
+    };
+
+    window.resetAllData = () => {
+        if (confirm('⚠️ DANGER: Reset ALL data for ALL SERVERS?\n\nThis will permanently delete:\n• All server alerts and settings\n• All activity logs\n• All saved players\n• All player databases\n• All population history\n• UI preferences\n\nThis action cannot be undone!')) {
+            // Get all localStorage keys that start with 'bms_'
+            const keysToRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.startsWith('bms_')) {
+                    keysToRemove.push(key);
+                }
+            }
+            
+            // Remove all BattleMetrics Monitor data
+            keysToRemove.forEach(key => localStorage.removeItem(key));
+            
+            // Reset current serverMonitor if it exists
+            if (serverMonitor) {
+                serverMonitor.alerts = {};
+                serverMonitor.activityLog = [];
+                serverMonitor.settings = {};
+                serverMonitor.savedPlayers = {};
+                serverMonitor.recentAlerts = {};
+                serverMonitor.playerDatabase = {};
+                serverMonitor.populationHistory = [];
+                serverMonitor.lastPlayerState = new Map();
+                serverMonitor.soundEnabled = true;
+                
+                // Update displays
+                serverMonitor.updatePlayerDisplay();
+                serverMonitor.updateActivityDisplay();
+                serverMonitor.updateAlertDisplay();
+                serverMonitor.updateSavedPlayersDisplay();
+                serverMonitor.updateRecentAlertsDisplay();
+                serverMonitor.updateDatabaseDisplay();
+                serverMonitor.updatePopulationDisplay();
+                serverMonitor.stopAlertReminders();
+            }
+            
+            alert('All data for all servers has been permanently deleted!');
+            
+            // Reload page to ensure clean state
+            setTimeout(() => location.reload(), 1000);
+        }
+    };
+
+    window.exportCurrentServer = () => {
+        if (!serverMonitor) {
+            alert('No server monitor data available to export.');
+            return;
+        }
+        
+        const exportData = {
+            serverID: currentServerID,
+            serverName: currentServerName,
+            exportDate: new Date().toISOString(),
+            alerts: serverMonitor.alerts,
+            activityLog: serverMonitor.activityLog,
+            settings: serverMonitor.settings,
+            savedPlayers: serverMonitor.savedPlayers,
+            recentAlerts: serverMonitor.recentAlerts,
+            playerDatabase: serverMonitor.playerDatabase,
+            populationHistory: serverMonitor.populationHistory
+        };
+        
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `battlemetrics_monitor_server_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        alert('Current server data exported successfully!');
+    };
+
+    window.exportAllServers = () => {
+        const allData = {};
+        let hasData = false;
+        
+        // Collect all BattleMetrics Monitor data from localStorage
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.startsWith('bms_')) {
+                try {
+                    const value = localStorage.getItem(key);
+                    allData[key] = JSON.parse(value);
+                    hasData = true;
+                } catch (e) {
+                    // If parsing fails, store as string
+                    allData[key] = localStorage.getItem(key);
+                    hasData = true;
+                }
+            }
+        }
+        
+        if (!hasData) {
+            alert('No BattleMetrics Monitor data found to export.');
+            return;
+        }
+        
+        const exportData = {
+            exportDate: new Date().toISOString(),
+            exportType: 'all_servers',
+            currentServerID: currentServerID,
+            data: allData
+        };
+        
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `battlemetrics_monitor_all_data_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        const serverCount = Object.keys(allData).filter(key => key.includes('_player_alerts_')).length;
+        alert(`All data exported successfully!\nIncluded data from ${serverCount} servers.`);
+    };
+
+    window.savePlayer = (playerName, playerId) => {
+        if (serverMonitor) {
+            serverMonitor.savePlayer(playerName, playerId);
+            serverMonitor.updateSavedPlayersDisplay();
+        }
+    };
+
+    window.removeSavedPlayer = (playerId) => {
+        if (serverMonitor && confirm('Remove this player from saved list?')) {
+            serverMonitor.removeSavedPlayer(playerId);
+            serverMonitor.updateSavedPlayersDisplay();
+        }
+    };
+
+    // Filter functions
+    window.filterActivity = (filterType) => {
+        if (!serverMonitor) return;
+        
+        const activityDiv = document.getElementById('recent-activity-list');
+        if (!activityDiv) return;
+
+        let filteredActivity = [...serverMonitor.activityLog];
+        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+
+        switch (filterType) {
+            case 'joined':
+                filteredActivity = filteredActivity.filter(entry => entry.action === 'joined');
+                break;
+            case 'left':
+                filteredActivity = filteredActivity.filter(entry => entry.action === 'left');
+                break;
+            case 'recent':
+                filteredActivity = filteredActivity.filter(entry => entry.timestamp >= oneHourAgo);
+                break;
+            case 'all':
+            default:
+                // Show all
+                break;
+        }
+
+        // Display filtered results
+        filteredActivity = filteredActivity.slice(-100).reverse(); // Last 100, most recent first
+        
+        if (filteredActivity.length === 0) {
+            activityDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No activity matches filter</div>';
+            return;
+        }
+
+        let activityHTML = '';
+        filteredActivity.forEach(entry => {
+            const timeAgo = toRelativeTime(entry.timestamp);
+            const actionColor = entry.action === 'joined' ? '#28a745' : '#dc3545';
+            const hasAlert = serverMonitor.alerts[entry.playerId];
+            const isSaved = serverMonitor.savedPlayers[entry.playerId];
+            
+            activityHTML += `
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
+                    <div style="flex: 1;">
+                        <div style="color: ${actionColor}; font-weight: bold;">
+                            ${entry.playerName} ${entry.action} the game
+                            ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                            ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                        </div>
+                        <div style="opacity: 0.7; font-size: 11px;">${timeAgo} - ${entry.time} - ID: ${entry.playerId}</div>
+                    </div>
+                    <div style="display: flex; gap: 3px;">
+                        <button onclick="window.open('https://www.battlemetrics.com/players/${entry.playerId}', '_blank')" 
+                                style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                title="View Profile">
+                            Profile
+                        </button>
+                        <button onclick="togglePlayerAlert('${entry.playerName}', '${entry.playerId}')" 
+                                style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
+                            ${hasAlert ? 'Remove' : 'Add Alert'}
+                        </button>
+                    </div>
+                </div>
+            `;
+        });
+
+        activityDiv.innerHTML = activityHTML;
+    };
+
+    window.clearActivityFilter = () => {
+        const filterSelect = document.getElementById('activity-filter');
+        if (filterSelect) {
+            filterSelect.value = 'all';
+            filterActivity('all');
+        }
+    };
+
+    window.filterDatabase = (filterType) => {
+        if (!serverMonitor) return;
+        
+        const databaseDiv = document.getElementById('player-database-list');
+        if (!databaseDiv) return;
+
+        let filteredPlayers = Object.values(serverMonitor.playerDatabase);
+        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+
+        switch (filterType) {
+            case 'online':
+                filteredPlayers = filteredPlayers.filter(player => serverMonitor.currentPlayers.has(player.id));
+                break;
+            case 'offline':
+                filteredPlayers = filteredPlayers.filter(player => !serverMonitor.currentPlayers.has(player.id));
+                break;
+            case 'recent-left':
+                // Players who were seen recently but are now offline
+                filteredPlayers = filteredPlayers.filter(player => 
+                    !serverMonitor.currentPlayers.has(player.id) && player.lastSeen >= oneHourAgo
+                );
+                break;
+            case 'name-changed':
+                filteredPlayers = filteredPlayers.filter(player => player.nameChanged);
+                break;
+            case 'all':
+            default:
+                // Show all
+                break;
+        }
+
+        // Sort by online status first, then by last seen
+        filteredPlayers.sort((a, b) => {
+            const aOnline = serverMonitor.currentPlayers.has(a.id);
+            const bOnline = serverMonitor.currentPlayers.has(b.id);
+            
+            if (aOnline && !bOnline) return -1;
+            if (!aOnline && bOnline) return 1;
+            
+            return b.lastSeen - a.lastSeen;
+        });
+
+        if (filteredPlayers.length === 0) {
+            databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players match filter</div>';
+            return;
+        }
+
+        serverMonitor.renderDatabasePlayers(filteredPlayers, databaseDiv);
+    };
+
+    window.clearDatabaseFilter = () => {
+        const filterSelect = document.getElementById('database-filter');
+        if (filterSelect) {
+            filterSelect.value = 'all';
+            filterDatabase('all');
+        }
+    };
+
+    window.testSound = () => {
+        if (serverMonitor) {
+            console.log('Testing alert sound...');
+            serverMonitor.playAlertSound();
+        }
+    };
+
+    // Cleanup function to remove UI elements when leaving server pages
+    const cleanup = () => {
+        // Stop monitoring
+        if (serverMonitor) {
+            serverMonitor.stopMonitoring();
+            serverMonitor.stopAlertReminders();
+        }
+        
+        // Clear intervals
+        if (monitoringInterval) {
+            clearInterval(monitoringInterval);
+            monitoringInterval = null;
+        }
+        if (alertReminderInterval) {
+            clearInterval(alertReminderInterval);
+            alertReminderInterval = null;
+        }
+        
+        // Remove UI elements
+        const toggleBtn = document.getElementById(TOGGLE_BUTTON_ID);
+        const monitor = document.getElementById(SERVER_MONITOR_ID);
+        const alertPanel = document.getElementById(ALERT_PANEL_ID);
+        
+        if (toggleBtn) toggleBtn.remove();
+        if (monitor) monitor.remove();
+        if (alertPanel) alertPanel.remove();
+        
+        // Reset variables
+        currentServerID = null;
+        serverMonitor = null;
+        lastPlayerList = new Map();
+        currentServerName = '';
+        activePlayerSearch = '';
+        activeDatabaseSearch = '';
+        
+        console.log('BattleMetrics Monitor - Cleaned up UI elements');
+    };
+
+    // Initialize when page loads
+    const initialize = () => {
+        // Always cleanup first to remove any existing UI elements
+        cleanup();
+        
+        // Check if we're on a server page - extract the actual server ID number
+        const serverMatch = window.location.pathname.match(/\/servers\/[^\/]+\/(\d+)/);
+        if (!serverMatch) {
+            console.log('BattleMetrics Monitor - Not on a server page, skipping initialization');
+            return;
+        }
+
+        currentServerID = serverMatch[1];
+        
+        // Debug logging
+        console.log('BattleMetrics Monitor - Current URL:', window.location.pathname);
+        console.log('BattleMetrics Monitor - Extracted Server ID:', currentServerID);
+        
+        // Initialize server-specific storage keys
+        initializeStorageKeys(currentServerID);
+        
+        // Get server name from page
+        const serverNameElement = document.querySelector('h1');
+        if (serverNameElement) {
+            currentServerName = serverNameElement.textContent.trim();
+        }
+
+        // Initialize components
+        serverMonitor = new ServerMonitor();
+        
+        // Create UI
+        createToggleButton();
+        createServerMonitor();
+        
+        // Update server ID display
+        setTimeout(() => {
+            const serverIdSpan = document.getElementById('current-server-id');
+            if (serverIdSpan) {
+                serverIdSpan.textContent = currentServerID;
+            }
+        }, 100);
+        
+        // Start monitoring by default
+        setTimeout(() => {
+            if (serverMonitor && !serverMonitor.isMonitoring) {
+                serverMonitor.startMonitoring();
+                const btn = document.getElementById('monitoring-btn');
+                if (btn) {
+                    btn.textContent = 'Stop Monitoring';
+                    btn.style.background = '#dc3545';
+                }
+            }
+        }, 2000);
+        
+        // Update counts less frequently to reduce lag
+        setInterval(() => {
+            if (!serverMonitor) return;
+            
+            const playerCountSpan = document.getElementById('player-count');
+            const alertCountSpan = document.getElementById('alert-count');
+            const savedCountSpan = document.getElementById('saved-count');
+            const recentAlertsCountSpan = document.getElementById('recent-alerts-count');
+            const activityCountSpan = document.getElementById('activity-count');
+            const databaseCountSpan = document.getElementById('database-count');
+            
+            if (playerCountSpan) playerCountSpan.textContent = serverMonitor.currentPlayers.size;
+            if (alertCountSpan) alertCountSpan.textContent = Object.keys(serverMonitor.alerts).length;
+            if (savedCountSpan) savedCountSpan.textContent = Object.keys(serverMonitor.savedPlayers).length;
+            if (activityCountSpan) activityCountSpan.textContent = serverMonitor.activityLog.length;
+            if (databaseCountSpan) databaseCountSpan.textContent = Object.keys(serverMonitor.playerDatabase).length;
+            
+            if (recentAlertsCountSpan) {
+                const unacknowledged = Object.values(serverMonitor.recentAlerts).filter(alert => !alert.acknowledged);
+                recentAlertsCountSpan.textContent = unacknowledged.length;
+            }
+            
+            // Also update the alert and saved displays to show current online/offline status
+            serverMonitor.updateAlertDisplay();
+            serverMonitor.updateSavedPlayersDisplay();
+        }, 3000); // Reduced from 1000ms to 3000ms
+
+        // Initialize displays
+        setTimeout(() => {
+            if (serverMonitor) {
+                console.log('Initializing server monitor displays...');
+                serverMonitor.updateAlertDisplay();
+                serverMonitor.updateSavedPlayersDisplay();
+                serverMonitor.updateRecentAlertsDisplay();
+                serverMonitor.updateDatabaseDisplay();
+                
+                // Start alert reminders if there are unacknowledged alerts
+                const unacknowledged = Object.values(serverMonitor.recentAlerts).filter(alert => !alert.acknowledged);
+                if (unacknowledged.length > 0) {
+                    serverMonitor.startAlertReminders();
+                }
+                
+                console.log('Server monitor initialized successfully');
+            }
+        }, 3000);
+
+        console.log('BattleMetrics Server Monitor initialized for server:', currentServerID);
+    };
+
+    // Wait for page to load and initialize
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initialize);
+    } else {
+        setTimeout(initialize, 1000);
+    }
+
+    // Handle navigation changes
+    let lastURL = location.href;
+    new MutationObserver(() => {
+        const url = location.href;
+        if (url !== lastURL) {
+            lastURL = url;
+            console.log('BattleMetrics Monitor - URL changed to:', url);
+            
+            // Check if we're navigating to/from a server page
+            const isServerPage = /\/servers\/[^\/]+\/\d+/.test(window.location.pathname);
+            const wasServerPage = currentServerID !== null;
+            
+            if (isServerPage) {
+                // We're on a server page, initialize
+                setTimeout(initialize, 1000);
+            } else if (wasServerPage) {
+                // We were on a server page but now we're not, cleanup
+                cleanup();
+            }
+        }
+    }).observe(document, { subtree: true, childList: true });
+
+})();
