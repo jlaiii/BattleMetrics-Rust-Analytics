@@ -337,8 +337,13 @@
             let currentServer = 'Not currently playing';
             
             if (allTopServers.length > 0) {
-                // Assume the first server in the list is the most recent/current
-                currentServer = allTopServers[0].name;
+                // Find the server with the most recent lastSeen timestamp
+                const mostRecentServer = allTopServers.reduce((most, current) => {
+                    if (!most.lastSeen) return current;
+                    if (!current.lastSeen) return most;
+                    return new Date(current.lastSeen) > new Date(most.lastSeen) ? current : most;
+                });
+                currentServer = mostRecentServer.name;
             }
 
             // Full server list (top 10)
