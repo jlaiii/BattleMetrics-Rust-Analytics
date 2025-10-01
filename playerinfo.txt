@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Rust Analytics
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.0.1
 // @description  analytics tool for BattleMetrics that displays Rust player statistics including total playtime, first seen date, and their players top servers by hours
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/*
@@ -23,6 +23,322 @@
     let cachedPlayerData = null;
     let currentServerPage = 0;
     let allTopServers = [];
+    let autoPullEnabled = true;
+    let debugConsoleEnabled = false;
+    let autoPullInterval = null;
+    
+    // Settings management
+    const loadSettings = () => {
+        try {
+            const settings = JSON.parse(localStorage.getItem('bma_settings') || '{}');
+            autoPullEnabled = settings.autoPullEnabled !== false; // Default to true
+            debugConsoleEnabled = settings.debugConsoleEnabled === true; // Default to false
+        } catch (e) {
+            autoPullEnabled = true;
+            debugConsoleEnabled = false;
+        }
+    };
+
+    const saveSettings = () => {
+        const settings = {
+            autoPullEnabled,
+            debugConsoleEnabled
+        };
+        localStorage.setItem('bma_settings', JSON.stringify(settings));
+    };
+
+    // Load settings on startup
+    loadSettings();
+
+    // Debug Console System
+    class DebugConsole {
+        constructor() {
+            this.logs = [];
+            this.enabled = debugConsoleEnabled;
+            this.maxLogs = 1000;
+            this.version = '1.0.1';
+        }
+
+        saveDebugSetting(enabled) {
+            debugConsoleEnabled = enabled;
+            this.enabled = enabled;
+            saveSettings();
+        }
+
+        log(level, message, data = null) {
+            const timestamp = new Date().toISOString();
+            const logEntry = {
+                timestamp,
+                level,
+                message,
+                data: data ? JSON.stringify(data, null, 2) : null,
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            };
+
+            this.logs.push(logEntry);
+            
+            // Keep only last maxLogs entries
+            if (this.logs.length > this.maxLogs) {
+                this.logs = this.logs.slice(-this.maxLogs);
+            }
+
+            // Always log to browser console if debug is enabled
+            if (this.enabled) {
+                const consoleMessage = `[BMA Debug ${level.toUpperCase()}] ${message}`;
+                switch (level) {
+                    case 'error':
+                        console.error(consoleMessage, data);
+                        break;
+                    case 'warn':
+                        console.warn(consoleMessage, data);
+                        break;
+                    case 'info':
+                        console.info(consoleMessage, data);
+                        break;
+                    default:
+                        console.log(consoleMessage, data);
+                }
+            }
+
+            // Update debug console display if it exists
+            this.updateDebugDisplay();
+        }
+
+        error(message, data = null) {
+            this.log('error', message, data);
+        }
+
+        warn(message, data = null) {
+            this.log('warn', message, data);
+        }
+
+        info(message, data = null) {
+            this.log('info', message, data);
+        }
+
+        debug(message, data = null) {
+            this.log('debug', message, data);
+        }
+
+        exportLogs() {
+            const exportData = {
+                version: this.version,
+                exportTime: new Date().toISOString(),
+                playerID: currentPlayerID,
+                totalLogs: this.logs.length,
+                logs: this.logs
+            };
+
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `bma_debug_log_${currentPlayerID || 'unknown'}_${new Date().toISOString().split('T')[0]}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            this.info('Debug logs exported', { filename: a.download, logCount: this.logs.length });
+        }
+
+        clearLogs() {
+            this.logs = [];
+            this.updateDebugDisplay();
+            this.updateDebugStats();
+            this.info('Debug logs cleared');
+        }
+
+        updateDebugDisplay() {
+            this.updateDebugStats();
+            
+            const debugList = document.getElementById('debug-console-list');
+            if (!debugList) return;
+
+            const recentLogs = this.logs.slice(-50).reverse(); // Show last 50 logs
+            
+            if (recentLogs.length === 0) {
+                debugList.innerHTML = '<div style="opacity: 0.7; font-style: italic; color: #6c757d;">No debug logs available</div>';
+                return;
+            }
+
+            let debugHTML = '';
+            recentLogs.forEach(log => {
+                const levelColor = {
+                    'error': '#dc3545',
+                    'warn': '#ffc107',
+                    'info': '#17a2b8',
+                    'debug': '#6c757d'
+                }[log.level] || '#6c757d';
+
+                const time = new Date(log.timestamp).toLocaleTimeString();
+                
+                debugHTML += `
+                    <div style="padding: 5px; margin-bottom: 3px; border-left: 3px solid ${levelColor}; background: rgba(255,255,255,0.05); font-size: 11px;">
+                        <div style="color: ${levelColor}; font-weight: bold;">
+                            [${log.level.toUpperCase()}] ${time}
+                        </div>
+                        <div style="color: white; margin: 2px 0;">
+                            ${log.message}
+                        </div>
+                        ${log.data ? `<div style="color: #6c757d; font-family: monospace; font-size: 10px; max-height: 100px; overflow-y: auto; white-space: pre-wrap;">${log.data}</div>` : ''}
+                    </div>
+                `;
+            });
+
+            debugList.innerHTML = debugHTML;
+        }
+
+        updateDebugStats() {
+            const statsDiv = document.getElementById('debug-stats');
+            if (!statsDiv) return;
+
+            const stats = this.getStats();
+            const oldestTime = stats.oldestLog ? new Date(stats.oldestLog).toLocaleString() : 'N/A';
+            
+            statsDiv.innerHTML = `
+                Total Logs: ${stats.totalLogs} | 
+                Errors: ${stats.errorCount} | 
+                Warnings: ${stats.warnCount} | 
+                Info: ${stats.infoCount} | 
+                Debug: ${stats.debugCount}
+                ${stats.oldestLog ? `<br>Oldest: ${oldestTime}` : ''}
+            `;
+        }
+
+        getStats() {
+            const stats = {
+                totalLogs: this.logs.length,
+                errorCount: this.logs.filter(l => l.level === 'error').length,
+                warnCount: this.logs.filter(l => l.level === 'warn').length,
+                infoCount: this.logs.filter(l => l.level === 'info').length,
+                debugCount: this.logs.filter(l => l.level === 'debug').length,
+                oldestLog: this.logs.length > 0 ? this.logs[0].timestamp : null,
+                newestLog: this.logs.length > 0 ? this.logs[this.logs.length - 1].timestamp : null
+            };
+            return stats;
+        }
+
+        getLogsAsText() {
+            const header = `BattleMetrics Rust Analytics v${this.version} Debug Logs
+Export Time: ${new Date().toISOString()}
+Player ID: ${currentPlayerID || 'Unknown'}
+Total Logs: ${this.logs.length}
+URL: ${window.location.href}
+User Agent: ${navigator.userAgent}
+
+=== DEBUG LOGS ===
+`;
+
+            const logsText = this.logs.map(log => {
+                const timestamp = new Date(log.timestamp).toLocaleString();
+                let logLine = `[${log.level.toUpperCase()}] ${timestamp}: ${log.message}`;
+                if (log.data) {
+                    logLine += `\nData: ${log.data}`;
+                }
+                return logLine;
+            }).join('\n\n');
+
+            return header + logsText;
+        }
+    }
+
+    // Initialize debug console
+    const debugConsole = new DebugConsole();
+
+    // Enhanced debug logging for playerinfo script
+    const debugLog = (level, message, data = null) => {
+        debugConsole.log(level, message, data);
+    };
+    
+    // Auto-pull functionality
+    const startAutoPull = () => {
+        if (autoPullInterval) return; // Already running
+        
+        debugLog('info', 'Starting auto-pull functionality');
+        
+        // Check immediately if we're on a player page
+        checkAndPullPlayerData();
+        
+        // Set up interval to check for player page changes
+        autoPullInterval = setInterval(() => {
+            checkAndPullPlayerData();
+        }, 2000); // Check every 2 seconds
+    };
+
+    const stopAutoPull = () => {
+        if (autoPullInterval) {
+            clearInterval(autoPullInterval);
+            autoPullInterval = null;
+            debugLog('info', 'Auto-pull functionality stopped');
+        }
+    };
+
+    const checkAndPullPlayerData = () => {
+        const currentURL = window.location.href;
+        
+        // Check if we're on a player page
+        if (!currentURL.includes('/players/')) {
+            // Clear current player ID if we're not on a player page
+            if (currentPlayerID) {
+                currentPlayerID = null;
+                removeResults();
+            }
+            return;
+        }
+        
+        // Extract player ID from URL
+        const playerID = currentURL.split('/players/')[1]?.split('/')[0];
+        if (!playerID) {
+            return;
+        }
+        
+        // Check if this is a new player or URL changed
+        if (currentPlayerID !== playerID || lastURL !== currentURL) {
+            debugLog('info', `Auto-pulling data for player ${playerID}`);
+            currentPlayerID = playerID;
+            lastURL = currentURL;
+            
+            // Check if data is available before processing
+            const dataScript = document.getElementById('storeBootstrap');
+            if (dataScript) {
+                try {
+                    const pageData = JSON.parse(dataScript.textContent);
+                    if (pageData?.state?.players?.serverInfo?.[playerID]) {
+                        // Data is ready, process immediately
+                        setTimeout(() => {
+                            processDataInstantly();
+                        }, 500);
+                    } else {
+                        // Data not ready, wait a bit longer
+                        setTimeout(() => {
+                            processDataInstantly();
+                        }, 2000);
+                    }
+                } catch (e) {
+                    // Error parsing data, wait and try
+                    setTimeout(() => {
+                        processDataInstantly();
+                    }, 2000);
+                }
+            } else {
+                // No data script yet, wait longer
+                setTimeout(() => {
+                    processDataInstantly();
+                }, 3000);
+            }
+        }
+    };
+
+    // Log script startup
+    debugLog('info', 'BattleMetrics Rust Analytics v1.0.1 loaded', {
+        url: window.location.href,
+        userAgent: navigator.userAgent,
+        autoPullEnabled,
+        debugConsoleEnabled
+    });
+    
+    // Debug console system initialized
+    debugLog('debug', 'Debug console system initialized');
 
     const removeResults = () => {
         const infoBox = document.getElementById(INFO_BOX_ID);
@@ -186,11 +502,11 @@
                 if (topServers.length > 10) {
                     content += `
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.2);">
-                            <button onclick="previousServerPage()" id="prev-btn" style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            <button id="prev-btn" style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                                 ← Back
                             </button>
                             <span id="page-info" style="font-size: 11px; opacity: 0.8;"></span>
-                            <button onclick="nextServerPage()" id="next-btn" style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            <button id="next-btn" style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                                 Next →
                             </button>
                         </div>
@@ -209,6 +525,69 @@
                     <button onclick="copyPlayerInfo()" style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; font-size: 12px;">
                         Copy Player Info
                     </button>
+                </div>
+                
+                <!-- Settings Section -->
+                <div style="background: rgba(108, 117, 125, 0.2); border: 1px solid #6c757d; border-radius: 5px; padding: 12px; margin-top: 15px;">
+                    <div style="font-size: 13px; font-weight: bold; color: #6c757d; margin-bottom: 10px; cursor: pointer;" onclick="toggleSettings()">
+                        Settings <span id="settings-toggle">▶</span>
+                    </div>
+                    <div id="settings-content" style="display: none;">
+                        <div style="margin-bottom: 8px;">
+                            <label style="display: flex; align-items: center; cursor: pointer; font-size: 12px;">
+                                <input type="checkbox" id="auto-pull-toggle" ${autoPullEnabled ? 'checked' : ''} style="margin-right: 8px;">
+                                Auto-pull profile data
+                            </label>
+                            <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 2px;">
+                                Automatically load player data when visiting profile pages
+                            </div>
+                        </div>
+                        <div>
+                            <label style="display: flex; align-items: center; cursor: pointer; font-size: 12px;">
+                                <input type="checkbox" id="debug-console-toggle" ${debugConsoleEnabled ? 'checked' : ''} style="margin-right: 8px;">
+                                Enable debug console
+                            </label>
+                            <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 2px;">
+                                Show debug console with detailed logging
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Debug Console Section -->
+                <div id="debug-console-section" style="background: rgba(52, 58, 64, 0.3); border: 1px solid #495057; border-radius: 5px; padding: 12px; margin-top: 15px; ${debugConsoleEnabled ? 'display: block;' : 'display: none;'}">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <div style="font-size: 13px; font-weight: bold; color: #495057;">
+                            Debug Console
+                        </div>
+                        <div>
+                            <button onclick="copyDebugLogs()" style="background: #17a2b8; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-right: 5px;">
+                                Copy Text
+                            </button>
+                            <button onclick="exportDebugLogs()" style="background: #28a745; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-right: 5px;">
+                                Export
+                            </button>
+                            <button onclick="clearDebugLogs()" style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-right: 5px;">
+                                Clear
+                            </button>
+                            <button onclick="testDebugConsole()" style="background: #6c757d; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;">
+                                Test
+                            </button>
+                        </div>
+                    </div>
+                    <div id="debug-stats" style="font-size: 10px; color: #6c757d; margin-bottom: 8px; padding: 5px; background: rgba(0,0,0,0.2); border-radius: 3px;">
+                        Loading debug statistics...
+                    </div>
+                    <div id="debug-console-list" style="max-height: 200px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 3px; padding: 8px; font-family: monospace;">
+                        <div style="opacity: 0.7; font-style: italic; color: #6c757d;">Loading debug logs...</div>
+                    </div>
+                </div>
+                
+                <!-- Version Info -->
+                <div style="text-align: center; padding: 10px; border-top: 1px solid rgba(255,255,255,0.2); margin-top: 15px;">
+                    <div style="font-size: 11px; color: #6c757d; opacity: 0.8;">
+                        BattleMetrics Rust Analytics v1.0.1
+                    </div>
                 </div>
             `;
         }
@@ -248,6 +627,21 @@
                     toggle.textContent = '▼';
                 } else {
                     serversList.style.display = 'none';
+                    toggle.textContent = '▶';
+                }
+            }
+        };
+
+        // Add toggle functionality for settings section
+        window.toggleSettings = () => {
+            const settingsContent = document.getElementById('settings-content');
+            const toggle = document.getElementById('settings-toggle');
+            if (settingsContent && toggle) {
+                if (settingsContent.style.display === 'none') {
+                    settingsContent.style.display = 'block';
+                    toggle.textContent = '▼';
+                } else {
+                    settingsContent.style.display = 'none';
                     toggle.textContent = '▶';
                 }
             }
@@ -294,17 +688,25 @@
         };
 
         window.nextServerPage = () => {
+            console.log('[BMA Debug] nextServerPage called, currentPage:', currentServerPage, 'totalServers:', allTopServers.length);
             const totalPages = Math.ceil(allTopServers.length / 10);
             if (currentServerPage < totalPages - 1) {
                 currentServerPage++;
+                console.log('[BMA Debug] Moving to page:', currentServerPage);
                 window.updateServersList();
+            } else {
+                console.log('[BMA Debug] Already at last page');
             }
         };
 
         window.previousServerPage = () => {
+            console.log('[BMA Debug] previousServerPage called, currentPage:', currentServerPage);
             if (currentServerPage > 0) {
                 currentServerPage--;
+                console.log('[BMA Debug] Moving to page:', currentServerPage);
                 window.updateServersList();
+            } else {
+                console.log('[BMA Debug] Already at first page');
             }
         };
 
@@ -407,10 +809,145 @@
             });
         };
 
+        // Add event listeners for pagination buttons (Firefox compatibility)
+        setTimeout(() => {
+            const prevBtn = document.getElementById('prev-btn');
+            const nextBtn = document.getElementById('next-btn');
+            
+            if (prevBtn) {
+                prevBtn.addEventListener('click', () => {
+                    console.log('[BMA Debug] Previous button clicked');
+                    window.previousServerPage();
+                });
+            }
+            
+            if (nextBtn) {
+                nextBtn.addEventListener('click', () => {
+                    console.log('[BMA Debug] Next button clicked');
+                    window.nextServerPage();
+                });
+            }
+        }, 50);
+
+        // Add debug console functions
+        window.copyDebugLogs = () => {
+            const debugText = debugConsole.getLogsAsText();
+            navigator.clipboard.writeText(debugText).then(() => {
+                const copyBtn = document.querySelector('button[onclick="copyDebugLogs()"]');
+                if (copyBtn) {
+                    const originalText = copyBtn.textContent;
+                    copyBtn.textContent = 'Copied!';
+                    copyBtn.style.background = '#28a745';
+                    setTimeout(() => {
+                        copyBtn.textContent = originalText;
+                        copyBtn.style.background = '#17a2b8';
+                    }, 2000);
+                }
+            }).catch(() => {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = debugText;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+            });
+        };
+
+        window.exportDebugLogs = () => {
+            debugConsole.exportLogs();
+        };
+
+        window.clearDebugLogs = () => {
+            debugConsole.clearLogs();
+        };
+
+        window.refreshDebugStats = () => {
+            if (debugConsole) {
+                debugConsole.updateDebugStats();
+            }
+        };
+
+        window.testDebugConsole = () => {
+            if (!debugConsole) {
+                alert('Debug console not initialized!');
+                return;
+            }
+            
+            debugConsole.debug('Test debug message from user');
+            debugConsole.info('Test info message from user');
+            debugConsole.warn('Test warning message from user');
+            debugConsole.error('Test error message from user');
+            
+            // Force refresh
+            setTimeout(() => {
+                debugConsole.updateDebugDisplay();
+                debugConsole.updateDebugStats();
+            }, 100);
+        };
+
+
+
         // Initialize servers list if we have servers
         if (allTopServers.length > 0) {
             setTimeout(() => window.updateServersList(), 100);
         }
+
+        // Initialize debug console display if enabled
+        if (debugConsoleEnabled) {
+            setTimeout(() => {
+                debugConsole.updateDebugDisplay();
+                debugConsole.updateDebugStats();
+            }, 200);
+        }
+
+        // Add event listeners for settings toggles
+        setTimeout(() => {
+            const autoPullToggle = document.getElementById('auto-pull-toggle');
+            const debugToggle = document.getElementById('debug-console-toggle');
+            
+            if (autoPullToggle) {
+                autoPullToggle.addEventListener('change', (e) => {
+                    autoPullEnabled = e.target.checked;
+                    saveSettings();
+                    debugLog('info', `Auto-pull ${autoPullEnabled ? 'enabled' : 'disabled'}`);
+                    
+                    if (autoPullEnabled) {
+                        startAutoPull();
+                    } else {
+                        stopAutoPull();
+                    }
+                    
+                    // Update button text
+                    const button = document.getElementById(BUTTON_ID);
+                    if (button) {
+                        button.textContent = autoPullEnabled ? "Refresh Analytics" : "Get Rust Analytics";
+                    }
+                });
+            }
+            
+            if (debugToggle) {
+                debugToggle.addEventListener('change', (e) => {
+                    debugConsoleEnabled = e.target.checked;
+                    debugConsole.saveDebugSetting(debugConsoleEnabled);
+                    debugLog('info', `Debug console ${debugConsoleEnabled ? 'enabled' : 'disabled'}`);
+                    
+                    // Show/hide debug console section
+                    const debugSection = document.getElementById('debug-console-section');
+                    if (debugSection) {
+                        debugSection.style.display = debugConsoleEnabled ? 'block' : 'none';
+                    }
+                    
+                    // Update debug display if enabled
+                    if (debugConsoleEnabled) {
+                        setTimeout(() => {
+                            debugConsole.updateDebugDisplay();
+                            debugConsole.updateDebugStats();
+                        }, 100);
+                    }
+                });
+            }
+        }, 100);
     };
 
     function toRelativeTime(timestamp) {
@@ -543,7 +1080,7 @@
             }
 
         } catch (e) {
-            console.error("BM Script Error:", e);
+            debugLog('error', 'Script processing error in processDataInstantly', e);
             const firstSeenData = { relative: "Error", full: null };
             showInfoBox("Unknown Player", "N/A", "Error", firstSeenData, [], 0, true, e.message);
 
@@ -571,7 +1108,7 @@
                 const pageData = JSON.parse(dataScript.textContent);
 
                 // Debug logging
-                console.log("BM Script Debug: pageData structure:", {
+                debugLog('debug', 'pageData structure analysis', {
                     hasState: !!pageData?.state,
                     hasPlayers: !!pageData?.state?.players,
                     hasServerInfo: !!pageData?.state?.players?.serverInfo,
@@ -615,12 +1152,12 @@
         // If data isn't ready, retry up to 8 times (longer wait for navigation)
         if (!dataCheck.ready) {
             if (retryCount < 8) {
-                console.log(`BM Script: ${dataCheck.reason}, retrying in 2 seconds... (attempt ${retryCount + 1}/8)`);
+                debugLog('warn', `${dataCheck.reason}, retrying in 2 seconds... (attempt ${retryCount + 1}/8)`);
                 setTimeout(() => calculateOrReload(retryCount + 1), 2000);
                 return;
             } else {
                 // After 8 retries, try to force reload the page data
-                console.log("BM Script: Data not ready after retries, attempting page reload...");
+                debugLog('error', 'Data not ready after retries, attempting page reload...');
                 sessionStorage.setItem(RELOAD_FLAG, 'true');
                 window.location.reload();
                 return;
@@ -779,7 +1316,7 @@
 
         const btn = document.createElement("button");
         btn.id = BUTTON_ID;
-        btn.textContent = "Get Rust Analytics";
+        btn.textContent = autoPullEnabled ? "Refresh Analytics" : "Get Rust Analytics";
         btn.onclick = calculateOrReload;
         Object.assign(btn.style, {
             position: "fixed",
@@ -1033,4 +1570,12 @@
             }
         }
     }, 10000); // Check every 10 seconds
+
+    // Initialize auto-pull if enabled
+    if (autoPullEnabled) {
+        debugLog('info', 'Auto-pull is enabled, starting auto-pull functionality');
+        startAutoPull();
+    } else {
+        debugLog('info', 'Auto-pull is disabled');
+    }
 })();
