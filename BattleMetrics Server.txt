@@ -234,10 +234,8 @@ User Agent: ${navigator.userAgent}
         timestamp: new Date().toISOString()
     });
     
-    // Add some test logs to verify debug console is working
+    // Debug console system initialized
     debugConsole.debug('Debug console system initialized');
-    debugConsole.warn('This is a test warning message');
-    debugConsole.error('This is a test error message');
 
     // Global variables - each tab will have its own instance
     let currentServerID = null;
@@ -1837,6 +1835,9 @@ User Agent: ${navigator.userAgent}
                 <div style="font-size: 11px; opacity: 0.7; margin-top: 4px; color: #17a2b8;">
                     Server ID: <span id="current-server-id">${currentServerID || 'Loading...'}</span>
                 </div>
+                <div style="font-size: 11px; opacity: 0.7; margin-top: 2px; color: #28a745;">
+                    Server: <span id="current-server-name">${currentServerName || 'Loading...'}</span>
+                </div>
             </div>
 
             <!-- Population Stats -->
@@ -2035,14 +2036,7 @@ User Agent: ${navigator.userAgent}
                                 style="background: #6f42c1; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                             Test Console
                         </button>
-                        <button onclick="testAlertSystem()" 
-                                style="background: #fd7e14; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
-                            Test Alerts
-                        </button>
-                        <button onclick="refreshDebugStats()" 
-                                style="background: #28a745; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
-                            Refresh Stats
-                        </button>
+
                         <button onclick="copyDebugLogs()" 
                                 style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                             Copy Text
@@ -2091,8 +2085,7 @@ User Agent: ${navigator.userAgent}
                     debugCheckbox.checked = debugConsole.enabled;
                 }
                 
-                // Always try to refresh stats and display
-                refreshDebugStats();
+                // Always try to refresh display
                 debugConsole.updateDebugDisplay();
             }
         }, 500);
@@ -2831,30 +2824,7 @@ User Agent: ${navigator.userAgent}
         });
     };
 
-    window.refreshDebugStats = () => {
-        console.log('[Debug Console] refreshDebugStats called');
-        if (!debugConsole) {
-            console.error('Debug console not initialized');
-            return;
-        }
-        
-        const statsDiv = document.getElementById('debug-stats');
-        console.log('[Debug Console] statsDiv found:', !!statsDiv);
-        
-        if (statsDiv) {
-            const stats = debugConsole.getStats();
-            console.log('[Debug Console] Stats:', stats);
-            statsDiv.innerHTML = `
-                Total Logs: ${stats.totalLogs} | 
-                Errors: <span style="color: #dc3545;">${stats.errorCount}</span> | 
-                Warnings: <span style="color: #ffc107;">${stats.warnCount}</span> | 
-                Info: <span style="color: #17a2b8;">${stats.infoCount}</span> | 
-                Debug: <span style="color: #6c757d;">${stats.debugCount}</span>
-                ${stats.oldestLog ? `<br>Oldest: ${new Date(stats.oldestLog).toLocaleString()}` : ''}
-            `;
-        }
-        debugConsole.updateDebugDisplay();
-    };
+
 
     // Test function for debug console
     window.testDebugConsole = () => {
@@ -3001,38 +2971,7 @@ User Agent: ${navigator.userAgent}
         console.log('========================');
     };
 
-    // Global function to test alert system
-    window.testAlertSystem = () => {
-        console.log('=== Alert System Test ===');
-        console.log('serverMonitor exists:', !!serverMonitor);
-        
-        if (!serverMonitor) {
-            console.log('ServerMonitor not initialized!');
-            return;
-        }
-        
-        console.log('Current alerts:', serverMonitor.alerts);
-        console.log('Alert count:', Object.keys(serverMonitor.alerts).length);
-        console.log('addAlert method exists:', typeof serverMonitor.addAlert === 'function');
-        console.log('removeAlert method exists:', typeof serverMonitor.removeAlert === 'function');
-        console.log('updateAlertDisplay method exists:', typeof serverMonitor.updateAlertDisplay === 'function');
-        
-        // Check UI elements first
-        checkAlertUI();
-        
-        // Test adding an alert
-        console.log('Testing add alert...');
-        serverMonitor.addAlert('TestPlayer', 'test123', 'both');
-        
-        // Check if alert div exists and has content
-        setTimeout(() => {
-            console.log('--- After adding alert ---');
-            checkAlertUI();
-            console.log('Alert display updated. Check the Alert Players section.');
-        }, 100);
-        
-        console.log('========================');
-    };
+
 
     // Cleanup function to remove UI elements when leaving server pages
     const cleanup = () => {
@@ -3126,13 +3065,71 @@ User Agent: ${navigator.userAgent}
         
         // Get server name from page with retry logic
         const getServerName = () => {
-            const serverNameElement = document.querySelector('h1, .server-name, [data-testid="server-name"]');
-            if (serverNameElement) {
+            // Try multiple selectors for BattleMetrics server name
+            const selectors = [
+                'h2.css-u0fcdd',  // BattleMetrics specific server name class
+                'h1',
+                'h2',
+                '.server-name',
+                '[data-testid="server-name"]',
+                'h1.server-title',
+                'h2.server-title',
+                '.server-header h1',
+                '.server-header h2',
+                '.server-info h1',
+                '.server-info h2',
+                'header h1',
+                'header h2',
+                '.page-header h1',
+                '.page-header h2',
+                '.server-details h1',
+                '.server-details h2',
+                'h1[class*="server"]',
+                'h2[class*="server"]',
+                'h1[class*="css-"]',
+                'h2[class*="css-"]',
+                '.server-name-display',
+                '.title h1',
+                '.title h2'
+            ];
+            
+            let serverNameElement = null;
+            for (const selector of selectors) {
+                serverNameElement = document.querySelector(selector);
+                if (serverNameElement && serverNameElement.textContent.trim()) {
+                    break;
+                }
+            }
+            
+            if (serverNameElement && serverNameElement.textContent.trim()) {
                 currentServerName = serverNameElement.textContent.trim();
                 debugConsole.info('Server name found: ' + currentServerName);
             } else {
+                // Try to extract from page title as fallback
+                const title = document.title;
+                if (title && title !== 'BattleMetrics') {
+                    // Remove common suffixes from title
+                    const cleanTitle = title.replace(/\s*-\s*BattleMetrics.*$/i, '').trim();
+                    if (cleanTitle && cleanTitle !== 'Server') {
+                        currentServerName = cleanTitle;
+                        debugConsole.info('Server name extracted from page title: ' + currentServerName);
+                        // Update UI immediately
+                        const serverNameSpan = document.getElementById('current-server-name');
+                        if (serverNameSpan) {
+                            serverNameSpan.textContent = currentServerName;
+                        }
+                        return;
+                    }
+                }
+                
                 currentServerName = `Server ${currentServerID}`;
                 debugConsole.warn('Server name not found, using default');
+            }
+            
+            // Update UI with the found server name
+            const serverNameSpan = document.getElementById('current-server-name');
+            if (serverNameSpan) {
+                serverNameSpan.textContent = currentServerName;
             }
         };
         
@@ -3179,11 +3176,16 @@ User Agent: ${navigator.userAgent}
         
         createUI();
         
-        // Update server ID display
+        // Update server ID and name display
         setTimeout(() => {
             const serverIdSpan = document.getElementById('current-server-id');
             if (serverIdSpan) {
                 serverIdSpan.textContent = currentServerID;
+            }
+            
+            const serverNameSpan = document.getElementById('current-server-name');
+            if (serverNameSpan) {
+                serverNameSpan.textContent = currentServerName || 'Loading...';
             }
         }, 500);
         
