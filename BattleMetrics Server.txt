@@ -3065,6 +3065,38 @@ User Agent: ${navigator.userAgent}
         
         // Get server name from page with retry logic
         const getServerName = () => {
+            // Helper function to clean extracted text from CSS and unwanted content
+            const cleanServerName = (text) => {
+                if (!text) return '';
+                
+                // Remove CSS content (anything that looks like CSS rules)
+                let cleaned = text.replace(/\.css-[a-zA-Z0-9-]+\{[^}]*\}/g, '');
+                
+                // Remove any remaining CSS-like patterns
+                cleaned = cleaned.replace(/\{[^}]*\}/g, '');
+                cleaned = cleaned.replace(/\.css-[a-zA-Z0-9-]+/g, '');
+                
+                // Remove common CSS properties and values
+                cleaned = cleaned.replace(/(display|margin|padding|font|color|background|border|width|height|position|top|left|right|bottom):[^;]*;?/gi, '');
+                
+                // Remove "Real-time player tracking & alerts" text
+                cleaned = cleaned.replace(/Real-time\s+player\s+tracking\s*&\s*alerts/gi, '');
+                
+                // Remove "Server Monitor" text if it appears at the start
+                cleaned = cleaned.replace(/^Server\s+Monitor/i, '');
+                
+                // Remove Server ID pattern
+                cleaned = cleaned.replace(/Server\s+ID:\s*\d+/gi, '');
+                
+                // Clean up whitespace and special characters
+                cleaned = cleaned.replace(/\s+/g, ' ').trim();
+                
+                // Remove any remaining non-printable characters
+                cleaned = cleaned.replace(/[^\x20-\x7E]/g, '');
+                
+                return cleaned;
+            };
+            
             // Try multiple selectors for BattleMetrics server name
             const selectors = [
                 'h2.css-u0fcdd',  // BattleMetrics specific server name class
@@ -3094,23 +3126,31 @@ User Agent: ${navigator.userAgent}
             ];
             
             let serverNameElement = null;
+            let rawText = '';
+            
             for (const selector of selectors) {
                 serverNameElement = document.querySelector(selector);
-                if (serverNameElement && serverNameElement.textContent.trim()) {
-                    break;
+                if (serverNameElement) {
+                    rawText = serverNameElement.textContent || serverNameElement.innerText || '';
+                    const cleanedName = cleanServerName(rawText);
+                    
+                    // Only accept if we have a reasonable server name (not empty, not just CSS)
+                    if (cleanedName && cleanedName.length > 3 && !cleanedName.match(/^(css-|Server\s*$|undefined|null)/i)) {
+                        currentServerName = cleanedName;
+                        debugConsole.info('Server name found via selector "' + selector + '": ' + currentServerName);
+                        debugConsole.debug('Raw text was: ' + rawText.substring(0, 100) + (rawText.length > 100 ? '...' : ''));
+                        break;
+                    }
                 }
             }
             
-            if (serverNameElement && serverNameElement.textContent.trim()) {
-                currentServerName = serverNameElement.textContent.trim();
-                debugConsole.info('Server name found: ' + currentServerName);
-            } else {
-                // Try to extract from page title as fallback
+            // If we still don't have a good server name, try page title
+            if (!currentServerName || currentServerName.length < 3) {
                 const title = document.title;
                 if (title && title !== 'BattleMetrics') {
                     // Remove common suffixes from title
                     const cleanTitle = title.replace(/\s*-\s*BattleMetrics.*$/i, '').trim();
-                    if (cleanTitle && cleanTitle !== 'Server') {
+                    if (cleanTitle && cleanTitle !== 'Server' && cleanTitle.length > 3) {
                         currentServerName = cleanTitle;
                         debugConsole.info('Server name extracted from page title: ' + currentServerName);
                         // Update UI immediately
