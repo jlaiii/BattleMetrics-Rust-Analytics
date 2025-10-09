@@ -3561,14 +3561,7 @@ User Agent: ${navigator.userAgent}
     if (/\/servers\/[^\/]+\/\d+/.test(window.location.pathname)) {
         initializeWhenReady();
         
-        // If this was after a reload (navigation triggered), process immediately
-        if (sessionStorage.getItem(SERVER_RELOAD_FLAG) === 'true') {
-            sessionStorage.removeItem(SERVER_RELOAD_FLAG);
-            console.log('BattleMetrics Monitor - Processing after navigation reload...');
-            setTimeout(() => {
-                initialize();
-            }, 1000);
-        }
+
     }
     
     // Also set up a fallback initialization check
@@ -3580,103 +3573,69 @@ User Agent: ${navigator.userAgent}
     }, 3000);
 
     // SIMPLE BRUTE FORCE APPROACH - Just reload if on server page without UI
-    const SERVER_RELOAD_FLAG = 'bms_server_reload_' + Date.now();
+    // Auto-initialization functionality (similar to player script)
+    let lastURL = window.location.href;
+    let autoInitInterval = null;
     
-    const forceReloadIfNeeded = () => {
-        const isServerPage = /\/servers\/rust\/\d+/.test(window.location.pathname);
-        const hasToggleButton = !!document.getElementById(TOGGLE_BUTTON_ID);
-        const hasServerMonitor = !!document.getElementById(SERVER_MONITOR_ID);
-        const hasUI = hasToggleButton || hasServerMonitor;
+    const startAutoInit = () => {
+        if (autoInitInterval) return; // Already running
         
-        console.log('BattleMetrics Monitor - Checking:', {
-            url: window.location.pathname,
-            isServerPage,
-            hasToggleButton,
-            hasServerMonitor,
-            hasUI,
-            reloadFlag: sessionStorage.getItem(SERVER_RELOAD_FLAG)
-        });
+        debugConsole.info('Starting auto-initialization functionality');
         
-        // If we're on a server page but don't have UI, FORCE RELOAD
-        if (isServerPage && !hasUI) {
-            console.log('BattleMetrics Monitor - SERVER PAGE DETECTED WITHOUT UI - FORCING RELOAD NOW!');
-            sessionStorage.setItem(SERVER_RELOAD_FLAG, 'true');
-            window.location.reload();
+        // Check immediately if we're on a server page
+        checkAndInitializeServer();
+        
+        // Set up interval to check for server page changes
+        autoInitInterval = setInterval(() => {
+            checkAndInitializeServer();
+        }, 1000); // Check every 1 second
+    };
+
+    const stopAutoInit = () => {
+        if (autoInitInterval) {
+            clearInterval(autoInitInterval);
+            autoInitInterval = null;
+            debugConsole.info('Auto-initialization functionality stopped');
+        }
+    };
+
+    const checkAndInitializeServer = () => {
+        const currentURL = window.location.href;
+        
+        // Check if we're on a server page
+        if (!currentURL.includes('/servers/')) {
+            // Clear current server ID if we're not on a server page
+            if (currentServerID) {
+                debugConsole.info('Left server page, cleaning up');
+                cleanup();
+                currentServerID = null;
+            }
             return;
         }
         
-        // If we have UI, clear the reload flag
-        if (isServerPage && hasUI) {
-            console.log('BattleMetrics Monitor - Server page with UI detected - stopping auto-reload');
-            sessionStorage.removeItem(SERVER_RELOAD_FLAG);
+        // Extract server ID from URL
+        const serverMatch = currentURL.match(/\/servers\/rust\/(\d+)/);
+        if (!serverMatch) {
+            return;
         }
-    };
-    
-    // SIMPLE APPROACH - Just check constantly if we need to reload
-    console.log('BattleMetrics Monitor - Starting aggressive reload checking...');
-    
-    // Check immediately
-    setTimeout(forceReloadIfNeeded, 500);
-    setTimeout(forceReloadIfNeeded, 1000);
-    setTimeout(forceReloadIfNeeded, 2000);
-    
-    // Check every second constantly
-    setInterval(forceReloadIfNeeded, 1000);
-    
-    // CRITICAL: Add URL change detection for SPA navigation
-    let currentURL = window.location.href;
-    
-    // Check for URL changes every 500ms (this catches SPA navigation)
-    setInterval(() => {
-        if (window.location.href !== currentURL) {
-            currentURL = window.location.href;
-            console.log('BattleMetrics Monitor - URL CHANGED TO:', currentURL);
+        
+        const serverID = serverMatch[1];
+        
+        // Check if this is a new server or URL changed
+        if (currentServerID !== serverID || lastURL !== currentURL) {
+            debugConsole.info(`Auto-initializing for server ${serverID}`);
+            lastURL = currentURL;
             
-            // Immediately check if we need to reload after URL change
-            setTimeout(forceReloadIfNeeded, 100);
-            setTimeout(forceReloadIfNeeded, 500);
-            setTimeout(forceReloadIfNeeded, 1000);
-            setTimeout(forceReloadIfNeeded, 2000);
+            // Initialize for the new server
+            setTimeout(() => {
+                initialize();
+            }, 500);
         }
-    }, 500);
-    
-    // Also listen for browser navigation events
-    window.addEventListener('popstate', () => {
-        console.log('BattleMetrics Monitor - POPSTATE detected');
-        setTimeout(forceReloadIfNeeded, 100);
-        setTimeout(forceReloadIfNeeded, 500);
-    });
-    
-    // Override history methods to catch programmatic navigation
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
-    
-    history.pushState = function() {
-        originalPushState.apply(history, arguments);
-        console.log('BattleMetrics Monitor - PUSHSTATE detected');
-        setTimeout(forceReloadIfNeeded, 100);
-        setTimeout(forceReloadIfNeeded, 500);
     };
     
-    history.replaceState = function() {
-        originalReplaceState.apply(history, arguments);
-        console.log('BattleMetrics Monitor - REPLACESTATE detected');
-        setTimeout(forceReloadIfNeeded, 100);
-        setTimeout(forceReloadIfNeeded, 500);
-    };
-    
-    // Listen for clicks that might cause navigation
-    document.addEventListener('click', (e) => {
-        const link = e.target.closest('a');
-        if (link && link.href && link.href.includes('/servers/')) {
-            console.log('BattleMetrics Monitor - SERVER LINK CLICKED:', link.href);
-            // Check multiple times after clicking a server link
-            setTimeout(forceReloadIfNeeded, 500);
-            setTimeout(forceReloadIfNeeded, 1000);
-            setTimeout(forceReloadIfNeeded, 2000);
-            setTimeout(forceReloadIfNeeded, 3000);
-        }
-    }, true);
+    // Start auto-initialization system
+    console.log('BattleMetrics Monitor - Starting auto-initialization system...');
+    startAutoInit();
     
     // That's it! Now it should catch SPA navigation!
     
