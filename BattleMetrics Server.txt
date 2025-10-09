@@ -832,7 +832,7 @@ User Agent: ${navigator.userAgent}
             this.updateRecentAlertsDisplay();
         }
 
-        addToDatabase(playerId, playerName) {
+        addToDatabase(playerId, playerName, skipDisplayUpdate = false) {
             const now = Date.now();
             let needsUpdate = false;
             
@@ -868,11 +868,15 @@ User Agent: ${navigator.userAgent}
             // Only save and update display if there were significant changes
             if (needsUpdate) {
                 this.savePlayerDatabase();
-                // Debounce database display updates
-                clearTimeout(this.databaseUpdateTimeout);
-                this.databaseUpdateTimeout = setTimeout(() => {
-                    this.updateDatabaseDisplay();
-                }, 1000);
+                
+                // Skip display updates during batch operations (initial load)
+                if (!skipDisplayUpdate) {
+                    // Debounce database display updates
+                    clearTimeout(this.databaseUpdateTimeout);
+                    this.databaseUpdateTimeout = setTimeout(() => {
+                        this.updateDatabaseDisplay();
+                    }, 1000);
+                }
             }
         }
 
@@ -966,17 +970,38 @@ User Agent: ${navigator.userAgent}
         }
 
         searchDatabase(query) {
-            if (!query || query.length < 2) return Object.values(this.playerDatabase);
+            if (!query || query.length < 2) return [];
             
             const lowerQuery = query.toLowerCase();
-            return Object.values(this.playerDatabase).filter(player => {
-                return player.currentName.toLowerCase().includes(lowerQuery) ||
-                       player.originalName.toLowerCase().includes(lowerQuery) ||
-                       player.id.includes(query) ||
-                       (player.previousNames && player.previousNames.some(name => 
-                           name.toLowerCase().includes(lowerQuery)
-                       ));
-            });
+            const results = [];
+            
+            // Use for...of loop for better performance than filter + multiple array operations
+            for (const player of Object.values(this.playerDatabase)) {
+                // Early exit conditions for better performance
+                if (player.currentName.toLowerCase().includes(lowerQuery) ||
+                    player.originalName.toLowerCase().includes(lowerQuery) ||
+                    player.id.includes(query)) {
+                    results.push(player);
+                    continue;
+                }
+                
+                // Only check previous names if we haven't found a match yet
+                if (player.previousNames && player.previousNames.length > 0) {
+                    for (const name of player.previousNames) {
+                        if (name.toLowerCase().includes(lowerQuery)) {
+                            results.push(player);
+                            break; // Found match, no need to check other previous names
+                        }
+                    }
+                }
+                
+                // Limit results to prevent UI lag with large datasets
+                if (results.length >= 100) {
+                    break;
+                }
+            }
+            
+            return results;
         }
 
         addAlert(playerName, playerId, alertType = 'both') {
@@ -1133,8 +1158,11 @@ User Agent: ${navigator.userAgent}
             
             this.isMonitoring = true;
             
-            // Initial player list
-            this.updatePlayerList();
+            // Show loading indicator
+            this.showLoadingIndicator();
+            
+            // Initial player list with optimized loading
+            this.updatePlayerList(true); // Pass true for initial load
             
             // Calculate initial population stats from loaded history
             this.calculatePopulationStats();
@@ -1186,31 +1214,89 @@ User Agent: ${navigator.userAgent}
             console.log('Stopped monitoring');
         }
 
-        updatePlayerList() {
+        updatePlayerList(isInitialLoad = false) {
             try {
                 const playerRows = document.querySelectorAll('table tbody tr');
                 const newPlayerList = new Map();
-
-                playerRows.forEach(row => {
-                    const nameCell = row.querySelector('td:first-child a');
-                    if (nameCell) {
-                        const playerName = nameCell.textContent.trim();
-                        const playerLink = nameCell.href;
-                        const playerId = playerLink.split('/players/')[1]?.split('/')[0];
-                        
-                        if (playerId && playerName) {
-                            newPlayerList.set(playerId, {
-                                name: playerName,
-                                id: playerId,
-                                lastSeen: Date.now()
-                            });
+                
+                // Batch process players to avoid blocking UI
+                const batchSize = isInitialLoad ? 50 : playerRows.length; // Process in smaller batches on initial load
+                let currentBatch = 0;
+                
+                const processBatch = () => {
+                    const startIndex = currentBatch * batchSize;
+                    const endIndex = Math.min(startIndex + batchSize, playerRows.length);
+                    
+                    // Process current batch
+                    for (let i = startIndex; i < endIndex; i++) {
+                        const row = playerRows[i];
+                        const nameCell = row.querySelector('td:first-child a');
+                        if (nameCell) {
+                            const playerName = nameCell.textContent.trim();
+                            const playerLink = nameCell.href;
+                            const playerId = playerLink.split('/players/')[1]?.split('/')[0];
                             
-                            // Add to database
-                            this.addToDatabase(playerId, playerName);
+                            if (playerId && playerName) {
+                                newPlayerList.set(playerId, {
+                                    name: playerName,
+                                    id: playerId,
+                                    lastSeen: Date.now()
+                                });
+                                
+                                // Add to database (batched, skip display updates during initial load)
+                                this.addToDatabase(playerId, playerName, isInitialLoad);
+                            }
                         }
                     }
-                });
-
+                    
+                    currentBatch++;
+                    
+                    // If there are more batches, schedule next batch
+                    if (endIndex < playerRows.length) {
+                        // Use requestAnimationFrame for smooth processing
+                        requestAnimationFrame(processBatch);
+                        return;
+                    }
+                    
+                    // All batches processed, now handle the rest
+                    this.finishPlayerListUpdate(newPlayerList, isInitialLoad);
+                };
+                
+                // Start processing
+                if (isInitialLoad && playerRows.length > batchSize) {
+                    console.log(`Processing ${playerRows.length} players in batches of ${batchSize}...`);
+                    processBatch();
+                } else {
+                    // Process all at once for smaller lists or regular updates
+                    playerRows.forEach(row => {
+                        const nameCell = row.querySelector('td:first-child a');
+                        if (nameCell) {
+                            const playerName = nameCell.textContent.trim();
+                            const playerLink = nameCell.href;
+                            const playerId = playerLink.split('/players/')[1]?.split('/')[0];
+                            
+                            if (playerId && playerName) {
+                                newPlayerList.set(playerId, {
+                                    name: playerName,
+                                    id: playerId,
+                                    lastSeen: Date.now()
+                                });
+                                
+                                // Add to database
+                                this.addToDatabase(playerId, playerName, isInitialLoad);
+                            }
+                        }
+                    });
+                    
+                    this.finishPlayerListUpdate(newPlayerList, isInitialLoad);
+                }
+            } catch (e) {
+                console.error('Error updating player list:', e);
+            }
+        }
+        
+        finishPlayerListUpdate(newPlayerList, isInitialLoad) {
+            try {
                 // Check for changes
                 let comparisonList = lastPlayerList;
                 
@@ -1247,13 +1333,55 @@ User Agent: ${navigator.userAgent}
                 // Record population for tracking
                 this.recordPopulation(newPlayerList.size);
                 
-                // Update all displays when player status changes
-                this.updatePlayerDisplay();
-                this.updateAlertDisplay();
-                this.updateSavedPlayersDisplay();
+                // Debounce display updates during initial load to prevent lag
+                if (isInitialLoad) {
+                    this.scheduleDisplayUpdates();
+                } else {
+                    // Update all displays when player status changes (regular updates)
+                    this.updatePlayerDisplay();
+                    this.updateAlertDisplay();
+                    this.updateSavedPlayersDisplay();
+                }
+                
+                console.log(`Player list updated: ${newPlayerList.size} players processed`);
             } catch (e) {
-                console.error('Error updating player list:', e);
+                console.error('Error finishing player list update:', e);
             }
+        }
+        
+        scheduleDisplayUpdates() {
+            // Clear any existing update timers
+            clearTimeout(this.displayUpdateTimeout);
+            
+            // Schedule display updates with a small delay to prevent blocking
+            this.displayUpdateTimeout = setTimeout(() => {
+                requestAnimationFrame(() => {
+                    this.updatePlayerDisplay();
+                    
+                    requestAnimationFrame(() => {
+                        this.updateAlertDisplay();
+                        
+                        requestAnimationFrame(() => {
+                            this.updateSavedPlayersDisplay();
+                            
+                            // Hide loading indicator when done
+                            this.hideLoadingIndicator();
+                        });
+                    });
+                });
+            }, 100);
+        }
+        
+        showLoadingIndicator() {
+            const playerListDiv = document.getElementById('current-players-list');
+            if (playerListDiv) {
+                playerListDiv.innerHTML = '<div style="text-align: center; padding: 20px; color: #ffc107;"><div style="font-size: 14px;">Loading players...</div><div style="font-size: 11px; opacity: 0.7; margin-top: 5px;">Processing large player list, please wait...</div></div>';
+            }
+        }
+        
+        hideLoadingIndicator() {
+            // Loading indicator will be replaced by actual content in updatePlayerDisplay
+            console.log('Initial loading completed');
         }
 
         syncPopulationCount() {
@@ -1288,34 +1416,74 @@ User Agent: ${navigator.userAgent}
                 return;
             }
 
-            let playersHTML = '';
-            this.currentPlayers.forEach((player, playerId) => {
+            // Use DocumentFragment for better performance with large player lists
+            const fragment = document.createDocumentFragment();
+            
+            // Limit display to prevent UI lag with very large servers
+            const maxDisplayPlayers = 200;
+            let playerCount = 0;
+            
+            for (const [playerId, player] of this.currentPlayers) {
+                if (playerCount >= maxDisplayPlayers) {
+                    // Add "show more" indicator
+                    const moreDiv = document.createElement('div');
+                    moreDiv.style.cssText = 'opacity: 0.7; font-style: italic; text-align: center; padding: 10px; color: #ffc107;';
+                    moreDiv.textContent = `... and ${this.currentPlayers.size - maxDisplayPlayers} more players (use search to find specific players)`;
+                    fragment.appendChild(moreDiv);
+                    break;
+                }
+                
                 const isAlerted = this.alerts[playerId];
-                playersHTML += `
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1);">
-                        <div style="flex: 1;">
-                            <a href="https://www.battlemetrics.com/players/${playerId}" target="_blank" style="color: #17a2b8; text-decoration: none;">
-                                ${player.name}
-                            </a>
-                            ${isAlerted ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
-                        </div>
-                        <div style="display: flex; gap: 5px;">
-                            <button onclick="togglePlayerAlert('${player.name}', '${playerId}')" 
-                                    style="background: ${isAlerted ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;"
-                                    title="${isAlerted ? 'Remove Alert' : 'Add Alert'}">
-                                ${isAlerted ? 'Remove' : 'Add Alert'}
-                            </button>
-                            <button onclick="savePlayer('${player.name}', '${playerId}')" 
-                                    style="background: #6c757d; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;"
-                                    title="Save Player">
-                                Save
-                            </button>
-                        </div>
-                    </div>
-                `;
-            });
+                
+                const playerDiv = document.createElement('div');
+                playerDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1);';
+                
+                const playerInfo = document.createElement('div');
+                playerInfo.style.cssText = 'flex: 1;';
+                
+                const playerLink = document.createElement('a');
+                playerLink.href = `https://www.battlemetrics.com/players/${playerId}`;
+                playerLink.target = '_blank';
+                playerLink.style.cssText = 'color: #17a2b8; text-decoration: none;';
+                playerLink.textContent = player.name;
+                
+                playerInfo.appendChild(playerLink);
+                
+                if (isAlerted) {
+                    const alertSpan = document.createElement('span');
+                    alertSpan.style.cssText = 'color: #ffc107; margin-left: 5px;';
+                    alertSpan.textContent = '[ALERT]';
+                    playerInfo.appendChild(alertSpan);
+                }
+                
+                const buttonsDiv = document.createElement('div');
+                buttonsDiv.style.cssText = 'display: flex; gap: 5px;';
+                
+                const alertBtn = document.createElement('button');
+                alertBtn.textContent = isAlerted ? 'Remove' : 'Add Alert';
+                alertBtn.title = isAlerted ? 'Remove Alert' : 'Add Alert';
+                alertBtn.style.cssText = `background: ${isAlerted ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;`;
+                alertBtn.onclick = () => togglePlayerAlert(player.name, playerId);
+                
+                const saveBtn = document.createElement('button');
+                saveBtn.textContent = 'Save';
+                saveBtn.title = 'Save Player';
+                saveBtn.style.cssText = 'background: #6c757d; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;';
+                saveBtn.onclick = () => savePlayer(player.name, playerId);
+                
+                buttonsDiv.appendChild(alertBtn);
+                buttonsDiv.appendChild(saveBtn);
+                
+                playerDiv.appendChild(playerInfo);
+                playerDiv.appendChild(buttonsDiv);
+                fragment.appendChild(playerDiv);
+                
+                playerCount++;
+            }
 
-            playerListDiv.innerHTML = playersHTML;
+            // Clear and append all at once
+            playerListDiv.innerHTML = '';
+            playerListDiv.appendChild(fragment);
         }
 
         updateActivityDisplay() {
@@ -1710,12 +1878,19 @@ User Agent: ${navigator.userAgent}
         }
 
         searchPlayers(query) {
+            if (!query || query.length < 2) return [];
+            
+            const lowerQuery = query.toLowerCase();
             const results = [];
-            this.currentPlayers.forEach((player, playerId) => {
-                if (player.name.toLowerCase().includes(query.toLowerCase())) {
+            
+            // Use for...of for better performance than forEach
+            for (const [playerId, player] of this.currentPlayers) {
+                if (player.name.toLowerCase().includes(lowerQuery) || 
+                    playerId.includes(query)) {
                     results.push(player);
                 }
-            });
+            }
+            
             return results;
         }
 
@@ -2137,16 +2312,20 @@ User Agent: ${navigator.userAgent}
         }
     };
 
-    window.handlePlayerSearch = (query) => {
+    // Debounce timer for search
+    let searchDebounceTimer = null;
+    let lastSearchQuery = '';
+    let cachedSearchResults = new Map();
+    
+    // Optimized search function with debouncing and caching
+    const performPlayerSearch = (query) => {
         const resultsDiv = document.getElementById('search-results');
         if (!resultsDiv || !serverMonitor) return;
 
-        // Track active search state
-        activePlayerSearch = query;
-
-        if (query.length < 2) {
-            activePlayerSearch = '';
-            resultsDiv.innerHTML = '';
+        // Check cache first
+        if (cachedSearchResults.has(query)) {
+            const cachedResults = cachedSearchResults.get(query);
+            renderSearchResults(cachedResults, resultsDiv);
             return;
         }
 
@@ -2154,22 +2333,22 @@ User Agent: ${navigator.userAgent}
         const currentResults = serverMonitor.searchPlayers(query);
         const databaseResults = serverMonitor.searchDatabase(query);
         
-        // Combine results, prioritizing current players and avoiding duplicates
+        // Combine results efficiently
         const allResults = [];
         const seenIds = new Set();
         
         // Add current players first (they're online)
-        currentResults.forEach(player => {
+        for (const player of currentResults) {
             allResults.push({
                 ...player,
                 isOnline: true,
                 source: 'current'
             });
             seenIds.add(player.id);
-        });
+        }
         
         // Add database players that aren't already in current players
-        databaseResults.forEach(player => {
+        for (const player of databaseResults) {
             if (!seenIds.has(player.id)) {
                 allResults.push({
                     ...player,
@@ -2179,13 +2358,8 @@ User Agent: ${navigator.userAgent}
                 });
                 seenIds.add(player.id);
             }
-        });
-        
-        if (allResults.length === 0) {
-            resultsDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic; font-size: 11px;">No players found</div>';
-            return;
         }
-
+        
         // Sort by online status first, then by name
         allResults.sort((a, b) => {
             if (a.isOnline && !b.isOnline) return -1;
@@ -2193,53 +2367,119 @@ User Agent: ${navigator.userAgent}
             return a.name.localeCompare(b.name);
         });
 
-        let resultsHTML = '';
+        // Cache results for this query
+        cachedSearchResults.set(query, allResults);
+        
+        // Limit cache size to prevent memory issues
+        if (cachedSearchResults.size > 50) {
+            const firstKey = cachedSearchResults.keys().next().value;
+            cachedSearchResults.delete(firstKey);
+        }
+
+        renderSearchResults(allResults, resultsDiv);
+    };
+
+    // Separate function to render results (reduces code duplication)
+    const renderSearchResults = (allResults, resultsDiv) => {
+        if (allResults.length === 0) {
+            resultsDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic; font-size: 11px;">No players found</div>';
+            return;
+        }
+
+        // Use DocumentFragment for better performance
+        const fragment = document.createDocumentFragment();
+        
         allResults.forEach(player => {
             const isAlerted = serverMonitor.alerts[player.id];
             const isSaved = serverMonitor.savedPlayers[player.id];
             
-            const onlineStatus = player.isOnline ? 
-                '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
-                '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
+            const playerDiv = document.createElement('div');
+            playerDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 11px;';
             
-            let nameDisplay = player.name;
-            if (player.source === 'database' && player.nameChanged && player.previousNames && player.previousNames.length > 0) {
-                nameDisplay = `${player.name} (was: ${player.previousNames[player.previousNames.length - 1]})`;
-            }
+            const playerInfo = document.createElement('div');
+            playerInfo.style.cssText = 'flex: 1; overflow: hidden;';
             
-            resultsHTML += `
-                <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); border-left: 3px solid ${player.isOnline ? '#28a745' : '#007bff'}; font-size: 11px;">
-                    <div style="flex: 1; padding-left: 8px;">
-                        <div>
-                            <span style="color: #17a2b8;">${nameDisplay}</span>
-                            ${onlineStatus}
-                            ${isAlerted ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
-                            ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
-                        </div>
-                        ${player.source === 'database' ? `<div style="opacity: 0.7; font-size: 10px;">ID: ${player.id} | Last seen: ${toRelativeTime(player.lastSeen)}</div>` : ''}
-                    </div>
-                    <div style="display: flex; gap: 3px;">
-                        <button onclick="window.open('https://www.battlemetrics.com/players/${player.id}', '_blank')" 
-                                style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;"
-                                title="View Profile">
-                            Profile
-                        </button>
-                        <button onclick="togglePlayerAlert('${player.name}', '${player.id}')" 
-                                style="background: ${isAlerted ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;"
-                                title="${isAlerted ? 'Remove Alert' : 'Add Alert'}">
-                            ${isAlerted ? 'Remove' : 'Add Alert'}
-                        </button>
-                        <button onclick="savePlayer('${player.name}', '${player.id}')" 
-                                style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;"
-                                title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
-                            ${isSaved ? 'Saved' : 'Save'}
-                        </button>
-                    </div>
+            const statusColor = player.isOnline ? '#28a745' : '#6c757d';
+            const statusText = player.isOnline ? 'ONLINE' : 'OFFLINE';
+            
+            playerInfo.innerHTML = `
+                <div style="color: white; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                    ${player.name}
+                </div>
+                <div style="color: ${statusColor}; font-size: 9px; margin-top: 1px;">
+                    ${statusText} • ID: ${player.id}
                 </div>
             `;
+            
+            const buttonsDiv = document.createElement('div');
+            buttonsDiv.style.cssText = 'display: flex; gap: 3px; margin-left: 5px;';
+            
+            // Profile button
+            const profileBtn = document.createElement('button');
+            profileBtn.textContent = 'Profile';
+            profileBtn.title = 'View Profile';
+            profileBtn.style.cssText = 'background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;';
+            profileBtn.onclick = () => window.open(`https://www.battlemetrics.com/players/${player.id}`, '_blank');
+            
+            // Alert button
+            const alertBtn = document.createElement('button');
+            alertBtn.textContent = isAlerted ? 'Remove' : 'Add Alert';
+            alertBtn.title = isAlerted ? 'Remove Alert' : 'Add Alert';
+            alertBtn.style.cssText = `background: ${isAlerted ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;`;
+            alertBtn.onclick = () => togglePlayerAlert(player.name, player.id);
+            
+            // Save button
+            const saveBtn = document.createElement('button');
+            saveBtn.textContent = isSaved ? 'Saved' : 'Save';
+            saveBtn.title = isSaved ? 'Already Saved' : 'Save Player';
+            saveBtn.style.cssText = `background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;`;
+            saveBtn.disabled = isSaved;
+            saveBtn.onclick = () => {
+                if (!isSaved) {
+                    savePlayer(player.name, player.id);
+                }
+            };
+            
+            buttonsDiv.appendChild(profileBtn);
+            buttonsDiv.appendChild(alertBtn);
+            buttonsDiv.appendChild(saveBtn);
+            
+            playerDiv.appendChild(playerInfo);
+            playerDiv.appendChild(buttonsDiv);
+            fragment.appendChild(playerDiv);
         });
+        
+        // Clear and append all at once for better performance
+        resultsDiv.innerHTML = '';
+        resultsDiv.appendChild(fragment);
+    };
 
-        resultsDiv.innerHTML = resultsHTML;
+    window.handlePlayerSearch = (query) => {
+        // Track active search state
+        activePlayerSearch = query;
+
+        // Clear previous timer
+        if (searchDebounceTimer) {
+            clearTimeout(searchDebounceTimer);
+        }
+
+        if (query.length < 2) {
+            activePlayerSearch = '';
+            const resultsDiv = document.getElementById('search-results');
+            if (resultsDiv) {
+                resultsDiv.innerHTML = '';
+            }
+            // Clear cache when search is cleared
+            cachedSearchResults.clear();
+            return;
+        }
+
+        // Debounce search to reduce lag
+        searchDebounceTimer = setTimeout(() => {
+            if (activePlayerSearch === query) { // Only search if query hasn't changed
+                performPlayerSearch(query);
+            }
+        }, 150); // 150ms debounce delay
     };
 
     // Debounce mechanism to prevent double-clicks
@@ -2283,6 +2523,11 @@ User Agent: ${navigator.userAgent}
             // Immediately update displays (the addAlert/removeAlert methods already call updateAlertDisplay)
             serverMonitor.updatePlayerDisplay();
             serverMonitor.updateSavedPlayersDisplay();
+            
+            // Clear search cache to ensure fresh results
+            if (typeof cachedSearchResults !== 'undefined') {
+                cachedSearchResults.clear();
+            }
             
             // Refresh search results to update button states
             const searchInput = document.getElementById('player-search');
@@ -2596,6 +2841,17 @@ User Agent: ${navigator.userAgent}
         if (serverMonitor) {
             serverMonitor.savePlayer(playerName, playerId);
             serverMonitor.updateSavedPlayersDisplay();
+            
+            // Clear search cache to ensure fresh results
+            if (typeof cachedSearchResults !== 'undefined') {
+                cachedSearchResults.clear();
+            }
+            
+            // Refresh search results to update button states
+            const searchInput = document.getElementById('player-search');
+            if (searchInput && searchInput.value.length >= 2) {
+                handlePlayerSearch(searchInput.value);
+            }
         }
     };
 
@@ -2603,6 +2859,17 @@ User Agent: ${navigator.userAgent}
         if (serverMonitor) {
             serverMonitor.removeSavedPlayer(playerId);
             serverMonitor.updateSavedPlayersDisplay();
+            
+            // Clear search cache to ensure fresh results
+            if (typeof cachedSearchResults !== 'undefined') {
+                cachedSearchResults.clear();
+            }
+            
+            // Refresh search results to update button states
+            const searchInput = document.getElementById('player-search');
+            if (searchInput && searchInput.value.length >= 2) {
+                handlePlayerSearch(searchInput.value);
+            }
         }
     };
 
@@ -3230,8 +3497,10 @@ User Agent: ${navigator.userAgent}
         }, 500);
         
         // Start monitoring by default
+        // Wait longer for page to fully load before starting monitoring
         setTimeout(() => {
             if (serverMonitor && !serverMonitor.isMonitoring) {
+                console.log('Auto-starting monitoring after page load delay...');
                 serverMonitor.startMonitoring();
                 const btn = document.getElementById('monitoring-btn');
                 if (btn) {
@@ -3239,7 +3508,7 @@ User Agent: ${navigator.userAgent}
                     btn.style.background = '#dc3545';
                 }
             }
-        }, 2000);
+        }, 3000); // Increased from 2000ms to 3000ms
         
         // Update counts less frequently to reduce lag
         setInterval(() => {
