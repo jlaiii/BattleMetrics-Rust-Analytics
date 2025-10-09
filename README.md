@@ -38,23 +38,3 @@ This is a **user script** and requires a browser extension to run.
 If you navigate to a different player's page, the script will automatically detect the change and prompt you to get the new player's stats.
 
 ---
-
-## Troubleshooting
-
--   **"Waiting for data..."** The script needs to wait for BattleMetrics to load all the player's data before it can calculate the hours. This can take a few seconds.
--   **No button appears**:
-    -   Ensure you are on a player's profile page (URL should be `https://www.battlemetrics.com/players/...`).
-    -   Check if your user script manager is enabled and the script is active for `battlemetrics.com`.
--   **Incorrect hours**: The script only calculates playtime on servers that have the game set to "Rust" in BattleMetrics. Playtime on incorrectly tagged servers may not be included.
-
----
-
-## Contributing
-
-Suggestions and bug reports are welcome! Please open an issue on the GitHub repository or submit a pull request with your changes.
-
----
-
-## License
-
-This project is licensed under the MIT License.
