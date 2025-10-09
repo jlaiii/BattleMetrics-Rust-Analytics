@@ -15,8 +15,8 @@
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             line-height: 1.6;
-            color: #333;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #e0e0e0;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
             min-height: 100vh;
         }
 
@@ -27,12 +27,13 @@
         }
 
         header {
-            background: rgba(255, 255, 255, 0.95);
+            background: rgba(26, 26, 46, 0.95);
             backdrop-filter: blur(10px);
-            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.3);
             position: sticky;
             top: 0;
             z-index: 100;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         }
 
         nav {
@@ -45,7 +46,7 @@
         .logo {
             font-size: 1.8rem;
             font-weight: bold;
-            color: #2c3e50;
+            color: #ffffff;
         }
 
         .nav-links {
@@ -56,13 +57,13 @@
 
         .nav-links a {
             text-decoration: none;
-            color: #2c3e50;
+            color: #e0e0e0;
             font-weight: 500;
             transition: color 0.3s;
         }
 
         .nav-links a:hover {
-            color: #667eea;
+            color: #64b5f6;
         }
 
         .hero {
@@ -131,18 +132,18 @@
         }
 
         .section-white {
-            background: white;
+            background: #1e1e2e;
         }
 
         .section-gray {
-            background: #f8f9fa;
+            background: #252540;
         }
 
         .section-title {
             text-align: center;
             font-size: 2.5rem;
             margin-bottom: 3rem;
-            color: #2c3e50;
+            color: #ffffff;
         }
 
         .features-grid {
@@ -153,11 +154,12 @@
         }
 
         .feature-card {
-            background: white;
+            background: #2a2a3e;
             padding: 2rem;
             border-radius: 15px;
-            box-shadow: 0 5px 25px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 5px 25px rgba(0, 0, 0, 0.3);
             transition: transform 0.3s;
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
 
         .feature-card:hover {
@@ -170,7 +172,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            background: #667eea;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border-radius: 50%;
             width: 70px;
             height: 70px;
@@ -179,16 +181,16 @@
         .feature-card h3 {
             font-size: 1.5rem;
             margin-bottom: 1rem;
-            color: #2c3e50;
+            color: #ffffff;
         }
 
         .feature-card p {
-            color: #666;
+            color: #b0b0b0;
             line-height: 1.6;
         }
 
         .installation {
-            background: #2c3e50;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             color: white;
             text-align: center;
         }
@@ -205,13 +207,14 @@
             padding: 2rem;
             border-radius: 15px;
             backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
         }
 
         .step-number {
             display: inline-block;
             width: 40px;
             height: 40px;
-            background: #667eea;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             border-radius: 50%;
             line-height: 40px;
@@ -232,16 +235,21 @@
         }
 
         .download-card {
-            background: white;
+            background: #2a2a3e;
             padding: 2rem;
             border-radius: 15px;
-            box-shadow: 0 5px 25px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 5px 25px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .download-card p {
+            color: #b0b0b0;
         }
 
         .download-card h3 {
             font-size: 1.8rem;
             margin-bottom: 1rem;
-            color: #2c3e50;
+            color: #ffffff;
         }
 
         .feature-list {
@@ -264,10 +272,11 @@
         }
 
         footer {
-            background: #2c3e50;
+            background: #1a1a2e;
             color: white;
             text-align: center;
             padding: 2rem 0;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
         }
 
         /* Modal Styles */
@@ -286,14 +295,15 @@
         }
 
         .modal-content {
-            background: white;
+            background: #2a2a3e;
             border-radius: 15px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
             max-width: 500px;
             width: 90%;
             max-height: 90vh;
             overflow-y: auto;
             animation: modalSlideIn 0.3s ease-out;
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
 
         @keyframes modalSlideIn {
@@ -312,11 +322,11 @@
             justify-content: space-between;
             align-items: center;
             padding: 1.5rem 2rem 1rem 2rem;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         }
 
         .modal-header h3 {
-            color: #2c3e50;
+            color: #ffffff;
             font-size: 1.5rem;
             margin: 0;
         }
@@ -325,7 +335,7 @@
             background: none;
             border: none;
             font-size: 2rem;
-            color: #999;
+            color: #b0b0b0;
             cursor: pointer;
             padding: 0;
             width: 30px;
@@ -338,8 +348,8 @@
         }
 
         .modal-close:hover {
-            background: #f0f0f0;
-            color: #666;
+            background: rgba(255, 255, 255, 0.1);
+            color: #ffffff;
         }
 
         .modal-body {
@@ -348,7 +358,7 @@
         }
 
         .modal-body p {
-            color: #666;
+            color: #b0b0b0;
             margin-bottom: 1rem;
             font-size: 1.1rem;
             line-height: 1.6;
@@ -356,7 +366,7 @@
 
         .modal-body p:last-child {
             font-weight: bold;
-            color: #2c3e50;
+            color: #ffffff;
             margin-bottom: 0;
         }
 
