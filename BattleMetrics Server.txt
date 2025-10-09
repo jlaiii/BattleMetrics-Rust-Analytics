@@ -1419,19 +1419,7 @@ User Agent: ${navigator.userAgent}
             // Use DocumentFragment for better performance with large player lists
             const fragment = document.createDocumentFragment();
             
-            // Limit display to prevent UI lag with very large servers
-            const maxDisplayPlayers = 200;
-            let playerCount = 0;
-            
             for (const [playerId, player] of this.currentPlayers) {
-                if (playerCount >= maxDisplayPlayers) {
-                    // Add "show more" indicator
-                    const moreDiv = document.createElement('div');
-                    moreDiv.style.cssText = 'opacity: 0.7; font-style: italic; text-align: center; padding: 10px; color: #ffc107;';
-                    moreDiv.textContent = `... and ${this.currentPlayers.size - maxDisplayPlayers} more players (use search to find specific players)`;
-                    fragment.appendChild(moreDiv);
-                    break;
-                }
                 
                 const isAlerted = this.alerts[playerId];
                 
@@ -1477,8 +1465,6 @@ User Agent: ${navigator.userAgent}
                 playerDiv.appendChild(playerInfo);
                 playerDiv.appendChild(buttonsDiv);
                 fragment.appendChild(playerDiv);
-                
-                playerCount++;
             }
 
             // Clear and append all at once
