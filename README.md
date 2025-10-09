@@ -33,8 +33,8 @@ Professional-grade player analytics and server monitoring tools for BattleMetric
    - Edge: [Microsoft Store](https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepeloendndfphd)
 
 ### Script Installation
-1. **Player Analytics Script**: [Install BMplayer.user.js](https://github.com/jlaiii/BattleMetrics-Rust-Player-Analytics/raw/refs/heads/main/BMplayer.user.js)
-2. **Server Monitor Script**: [Install BMserver.user.js](https://github.com/jlaiii/BattleMetrics-Rust-Player-Analytics/raw/refs/heads/main/BMserver.user.js)
+1. **Player Analytics Script**: [Install BMplayer.user.js](https://github.com/jlaiii/BattleMetrics-Rust-Analytics/raw/refs/heads/main/BMplayer.user.js)
+2. **Server Monitor Script**: [Install BMserver.user.js](https://github.com/jlaiii/BattleMetrics-Rust-Analytics/raw/refs/heads/main/BMserver.user.js)
 
 ### Quick Setup
 1. Install Tampermonkey extension
@@ -109,7 +109,7 @@ Both scripts include comprehensive debug consoles:
 - Test functionality
 
 ### Getting Help
-- **GitHub Issues**: [Report bugs or request features](https://github.com/jlaiii/BattleMetrics-Rust-Player-Analytics/issues)
+- **GitHub Issues**: [Report bugs or request features](https://github.com/jlaiii/BattleMetrics-Rust-Analytics/issues)
 - **Discord Support**: [Join our Discord server](https://discord.gg/a5T2xBhKgt)
 
 ## 📊 Screenshots
@@ -159,6 +159,9 @@ We welcome contributions! Here's how you can help:
 - Test thoroughly before submitting
 - Update documentation as needed
 
+## 📄 License
+
+This project is open source and available under the [MIT License](LICENSE).
 
 ## ⚠️ Disclaimer
 
@@ -180,7 +183,7 @@ If you find these tools useful:
 
 - **GitHub**: [jlaiii](https://github.com/jlaiii)
 - **Discord**: [Join our server](https://discord.gg/a5T2xBhKgt)
-- **Issues**: [GitHub Issues](https://github.com/jlaiii/BattleMetrics-Rust-Player-Analytics/issues)
+- **Issues**: [GitHub Issues](https://github.com/jlaiii/BattleMetrics-Rust-Analytics/issues)
 
 ---
 
