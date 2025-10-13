@@ -1,0 +1,4342 @@
+// ==UserScript==
+// @name         BattleMetrics Server Monitor & Alert System
+// @namespace    http://tampermonkey.net/
+// @version      1.0.1
+// @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
+// @author       jlaiii
+// @match        https://www.battlemetrics.com/servers/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // Constants - make them tab-specific to prevent cross-tab interference
+    const SERVER_MONITOR_ID = `bms-server-monitor-${Math.random().toString(36).substr(2, 9)}`;
+    const TOGGLE_BUTTON_ID = `bms-toggle-button-${Math.random().toString(36).substr(2, 9)}`;
+    const ALERT_PANEL_ID = `bms-alert-panel-${Math.random().toString(36).substr(2, 9)}`;
+    const MENU_VISIBLE_KEY = 'bms_menu_visible';
+    
+    // Server-specific storage keys (will be set after server ID is determined)
+    let ALERTS_KEY = '';
+    let ACTIVITY_LOG_KEY = '';
+    let ALERT_SETTINGS_KEY = '';
+    let SAVED_PLAYERS_KEY = '';
+    let RECENT_ALERTS_KEY = '';
+    let PLAYER_DATABASE_KEY = '';
+    let POPULATION_HISTORY_KEY = '';
+    let LAST_PLAYER_STATE_KEY = '';
+    
+    // Function to initialize server-specific keys
+    const initializeStorageKeys = (serverID) => {
+        ALERTS_KEY = `bms_player_alerts_${serverID}`;
+        ACTIVITY_LOG_KEY = `bms_activity_log_${serverID}`;
+        ALERT_SETTINGS_KEY = `bms_alert_settings_${serverID}`;
+        SAVED_PLAYERS_KEY = `bms_saved_players_${serverID}`;
+        RECENT_ALERTS_KEY = `bms_recent_alerts_${serverID}`;
+        PLAYER_DATABASE_KEY = `bms_player_database_${serverID}`;
+        POPULATION_HISTORY_KEY = `bms_population_history_${serverID}`;
+        LAST_PLAYER_STATE_KEY = `bms_last_player_state_${serverID}`;
+    };
+
+    // Debug Console System
+    class DebugConsole {
+        constructor() {
+            this.logs = [];
+            this.enabled = this.loadDebugSetting();
+            this.maxLogs = 1000;
+            this.version = '1.0.1';
+        }
+
+        loadDebugSetting() {
+            const saved = localStorage.getItem('bms_debug_enabled');
+            // Default to false (off by default)
+            return saved === 'true';
+        }
+
+        saveDebugSetting(enabled) {
+            localStorage.setItem('bms_debug_enabled', enabled.toString());
+            this.enabled = enabled;
+        }
+
+        log(level, message, data = null) {
+            const timestamp = new Date().toISOString();
+            const logEntry = {
+                timestamp,
+                level,
+                message,
+                data: data ? JSON.stringify(data, null, 2) : null,
+                url: window.location.href,
+                userAgent: navigator.userAgent
+            };
+
+            this.logs.push(logEntry);
+            
+            // Keep only last maxLogs entries
+            if (this.logs.length > this.maxLogs) {
+                this.logs = this.logs.slice(-this.maxLogs);
+            }
+
+            // Always log to browser console if debug is enabled
+            if (this.enabled) {
+                const consoleMessage = `[BMS Debug ${level.toUpperCase()}] ${message}`;
+                switch (level) {
+                    case 'error':
+                        console.error(consoleMessage, data);
+                        break;
+                    case 'warn':
+                        console.warn(consoleMessage, data);
+                        break;
+                    case 'info':
+                        console.info(consoleMessage, data);
+                        break;
+                    default:
+                        console.log(consoleMessage, data);
+                }
+            }
+
+            // Update debug console display if it exists
+            this.updateDebugDisplay();
+        }
+
+        error(message, data = null) {
+            this.log('error', message, data);
+        }
+
+        warn(message, data = null) {
+            this.log('warn', message, data);
+        }
+
+        info(message, data = null) {
+            this.log('info', message, data);
+        }
+
+        debug(message, data = null) {
+            this.log('debug', message, data);
+        }
+
+        exportLogs() {
+            const exportData = {
+                version: this.version,
+                exportTime: new Date().toISOString(),
+                serverID: currentServerID,
+                serverName: currentServerName,
+                totalLogs: this.logs.length,
+                logs: this.logs
+            };
+
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `bms_debug_log_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            this.info('Debug logs exported', { filename: a.download, logCount: this.logs.length });
+        }
+
+        clearLogs() {
+            this.logs = [];
+            this.updateDebugDisplay();
+            this.info('Debug logs cleared');
+        }
+
+        updateDebugDisplay() {
+            const debugList = document.getElementById('debug-console-list');
+            if (!debugList) {
+                console.log('[Debug Console] Element debug-console-list not found');
+                return;
+            }
+
+            const recentLogs = this.logs.slice(-50).reverse(); // Show last 50 logs
+            console.log('[Debug Console] Updating display with', recentLogs.length, 'logs');
+            
+            if (recentLogs.length === 0) {
+                debugList.innerHTML = '<div style="opacity: 0.7; font-style: italic; color: #6c757d;">No debug logs available</div>';
+                return;
+            }
+
+            let debugHTML = '';
+            recentLogs.forEach(log => {
+                const levelColor = {
+                    'error': '#dc3545',
+                    'warn': '#ffc107',
+                    'info': '#17a2b8',
+                    'debug': '#6c757d'
+                }[log.level] || '#6c757d';
+
+                const time = new Date(log.timestamp).toLocaleTimeString();
+                
+                debugHTML += `
+                    <div style="padding: 5px; margin-bottom: 3px; border-left: 3px solid ${levelColor}; background: rgba(255,255,255,0.05); font-size: 11px;">
+                        <div style="color: ${levelColor}; font-weight: bold;">
+                            [${log.level.toUpperCase()}] ${time}
+                        </div>
+                        <div style="color: white; margin: 2px 0;">
+                            ${log.message}
+                        </div>
+                        ${log.data ? `<div style="color: #6c757d; font-family: monospace; font-size: 10px; max-height: 100px; overflow-y: auto; white-space: pre-wrap;">${log.data}</div>` : ''}
+                    </div>
+                `;
+            });
+
+            debugList.innerHTML = debugHTML;
+            console.log('[Debug Console] Display updated with HTML length:', debugHTML.length);
+        }
+
+        getStats() {
+            const stats = {
+                totalLogs: this.logs.length,
+                errorCount: this.logs.filter(l => l.level === 'error').length,
+                warnCount: this.logs.filter(l => l.level === 'warn').length,
+                infoCount: this.logs.filter(l => l.level === 'info').length,
+                debugCount: this.logs.filter(l => l.level === 'debug').length,
+                oldestLog: this.logs.length > 0 ? this.logs[0].timestamp : null,
+                newestLog: this.logs.length > 0 ? this.logs[this.logs.length - 1].timestamp : null
+            };
+            return stats;
+        }
+
+        getLogsAsText() {
+            const header = `BattleMetrics Server Monitor v${this.version} Debug Logs
+Export Time: ${new Date().toISOString()}
+Server ID: ${currentServerID || 'Unknown'}
+Server Name: ${currentServerName || 'Unknown'}
+Total Logs: ${this.logs.length}
+URL: ${window.location.href}
+User Agent: ${navigator.userAgent}
+
+=== DEBUG LOGS ===
+`;
+
+            const logsText = this.logs.map(log => {
+                const timestamp = new Date(log.timestamp).toLocaleString();
+                let logLine = `[${log.level.toUpperCase()}] ${timestamp}: ${log.message}`;
+                if (log.data) {
+                    logLine += `\nData: ${log.data}`;
+                }
+                return logLine;
+            }).join('\n\n');
+
+            return header + logsText;
+        }
+    }
+
+    // Initialize debug console
+    const debugConsole = new DebugConsole();
+    
+    // Log script startup
+    debugConsole.info('BattleMetrics Server Monitor v1.0.1 loaded', {
+        url: window.location.href,
+        userAgent: navigator.userAgent,
+        timestamp: new Date().toISOString()
+    });
+    
+    // Debug console system initialized
+    debugConsole.debug('Debug console system initialized');
+
+    // Global variables - each tab will have its own instance
+    let currentServerID = null;
+    let serverMonitor = null;
+    let monitoringInterval = null;
+    let lastPlayerList = new Map();
+    let currentServerName = '';
+    let alertReminderInterval = null;
+    let populationStatsInterval = null;
+    let timestampRefreshInterval = null;
+    
+    // Population tracking variables
+    let populationHistory = [];
+    let currentPopulation = 0;
+    let lastHourChange = 0;
+    let predictedNextHour = 0;
+    
+    // Search state tracking to prevent interference
+    let activePlayerSearch = '';
+    let activeDatabaseSearch = '';
+    
+    // Search caches for better performance
+    let databaseSearchCache = new Map();
+    let cachedSearchResults = new Map();
+    
+    // Function to clear all search caches
+    const clearAllSearchCaches = () => {
+        try {
+            if (cachedSearchResults) {
+                cachedSearchResults.clear();
+            }
+            if (databaseSearchCache) {
+                databaseSearchCache.clear();
+            }
+            console.log('All search caches cleared');
+        } catch (error) {
+            console.warn('Error clearing search caches:', error);
+        }
+    };
+    
+    // Generate unique tab identifier to prevent cross-tab interference
+    const tabId = Math.random().toString(36).substr(2, 9);
+
+    // Utility functions
+    const isMenuVisible = () => {
+        return localStorage.getItem(MENU_VISIBLE_KEY) !== 'false';
+    };
+
+    const setMenuVisibility = (visible) => {
+        localStorage.setItem(MENU_VISIBLE_KEY, visible.toString());
+        updateUIVisibility();
+    };
+
+    const updateUIVisibility = () => {
+        const monitor = document.getElementById(SERVER_MONITOR_ID);
+        const alertPanel = document.getElementById(ALERT_PANEL_ID);
+        const visible = isMenuVisible();
+
+        if (monitor) {
+            monitor.style.display = visible ? 'block' : 'none';
+        }
+        if (alertPanel && !visible) {
+            alertPanel.style.display = 'none';
+        }
+
+        updateToggleButton();
+    };
+
+    const updateToggleButton = () => {
+        const toggleBtn = document.getElementById(TOGGLE_BUTTON_ID);
+        if (toggleBtn) {
+            const visible = isMenuVisible();
+            toggleBtn.textContent = visible ? 'X' : 'SM';
+            toggleBtn.title = visible ? 'Hide Server Monitor' : 'Show Server Monitor';
+        }
+    };
+
+    const toRelativeTime = (timestamp) => {
+        const now = Date.now();
+        const diff = now - new Date(timestamp).getTime();
+        const seconds = Math.floor(diff / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+
+        if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`;
+        if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+        if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+        return 'a few seconds ago';
+    };
+
+    // Server Monitor Class
+    class ServerMonitor {
+        constructor() {
+            try {
+                console.log('🔧 ServerMonitor constructor starting...');
+                
+                // Load critical data first
+                this.alerts = this.loadAlerts();
+                this.settings = this.loadSettings();
+                this.isMonitoring = false;
+                this.currentPlayers = new Map();
+                this.soundEnabled = this.settings.soundEnabled !== false;
+                
+                // Initialize other properties
+                this.activityLog = [];
+                this.savedPlayers = {};
+                this.recentAlerts = {};
+                this.playerDatabase = {};
+                this.populationHistory = [];
+                this.lastPlayerState = new Map();
+                
+                console.log('✅ ServerMonitor core properties initialized');
+                
+                // Lazy load heavy data after a short delay to prevent UI blocking
+                setTimeout(() => this.loadHeavyData(), 100);
+                
+                console.log('✅ ServerMonitor constructor completed');
+            } catch (error) {
+                console.error('❌ Error in ServerMonitor constructor:', error);
+                throw error;
+            }
+        }
+
+        loadHeavyData() {
+            try {
+                console.log('Loading heavy data in background...');
+                
+                // Load data in order of importance with individual error handling
+                try {
+                    this.savedPlayers = this.loadSavedPlayers();
+                } catch (e) {
+                    console.warn('Failed to load saved players:', e);
+                    this.savedPlayers = {};
+                }
+                
+                try {
+                    this.recentAlerts = this.loadRecentAlerts();
+                } catch (e) {
+                    console.warn('Failed to load recent alerts:', e);
+                    this.recentAlerts = {};
+                }
+                
+                try {
+                    this.activityLog = this.loadActivityLog();
+                } catch (e) {
+                    console.warn('Failed to load activity log:', e);
+                    this.activityLog = [];
+                }
+                
+                try {
+                    this.populationHistory = this.loadPopulationHistory();
+                } catch (e) {
+                    console.warn('Failed to load population history:', e);
+                    this.populationHistory = [];
+                }
+                
+                try {
+                    this.lastPlayerState = this.loadLastPlayerState();
+                } catch (e) {
+                    console.warn('Failed to load last player state:', e);
+                    this.lastPlayerState = new Map();
+                }
+                
+                // Load player database last as it's the heaviest
+                try {
+                    this.playerDatabase = this.loadPlayerDatabase();
+                } catch (e) {
+                    console.warn('Failed to load player database:', e);
+                    this.playerDatabase = {};
+                }
+                
+                console.log('Heavy data loading completed');
+                
+                // Update displays after data is loaded
+                // Temporarily disabled to fix initialization
+                // try {
+                //     this.updateAllDisplays();
+                // } catch (e) {
+                //     console.warn('Failed to update displays after loading:', e);
+                // }
+                
+            } catch (error) {
+                console.error('Error loading heavy data:', error);
+                if (typeof debugConsole !== 'undefined') {
+                    debugConsole.error('Error loading heavy data', error);
+                }
+            }
+        }
+
+        updateAllDisplays() {
+            // Update all UI displays after data is loaded with individual error handling
+            try {
+                if (typeof this.updateAlertDisplay === 'function') this.updateAlertDisplay();
+            } catch (e) {
+                console.warn('Failed to update alert display:', e);
+            }
+            
+            try {
+                if (typeof this.updateSavedPlayersDisplay === 'function') this.updateSavedPlayersDisplay();
+            } catch (e) {
+                console.warn('Failed to update saved players display:', e);
+            }
+            
+            try {
+                if (typeof this.updateRecentAlertsDisplay === 'function') this.updateRecentAlertsDisplay();
+            } catch (e) {
+                console.warn('Failed to update recent alerts display:', e);
+            }
+            
+            try {
+                if (typeof this.updateActivityDisplay === 'function') this.updateActivityDisplay();
+            } catch (e) {
+                console.warn('Failed to update activity display:', e);
+            }
+            
+            try {
+                if (typeof this.updateDatabaseDisplay === 'function') this.updateDatabaseDisplay();
+            } catch (e) {
+                console.warn('Failed to update database display:', e);
+            }
+            
+            try {
+                if (typeof this.updatePopulationDisplay === 'function') this.updatePopulationDisplay();
+            } catch (e) {
+                console.warn('Failed to update population display:', e);
+            }
+        }
+
+        loadAlerts() {
+            try {
+                return JSON.parse(localStorage.getItem(ALERTS_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        saveAlerts() {
+            localStorage.setItem(ALERTS_KEY, JSON.stringify(this.alerts));
+        }
+
+        loadActivityLog() {
+            try {
+                const log = JSON.parse(localStorage.getItem(ACTIVITY_LOG_KEY) || '[]');
+                return log.slice(-1000); // Keep last 1000 entries
+            } catch {
+                return [];
+            }
+        }
+
+        saveActivityLog() {
+            localStorage.setItem(ACTIVITY_LOG_KEY, JSON.stringify(this.activityLog.slice(-1000)));
+        }
+
+        loadSettings() {
+            try {
+                return JSON.parse(localStorage.getItem(ALERT_SETTINGS_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        saveSettings() {
+            localStorage.setItem(ALERT_SETTINGS_KEY, JSON.stringify(this.settings));
+        }
+
+        loadSavedPlayers() {
+            try {
+                return JSON.parse(localStorage.getItem(SAVED_PLAYERS_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        saveSavedPlayers() {
+            localStorage.setItem(SAVED_PLAYERS_KEY, JSON.stringify(this.savedPlayers));
+        }
+
+        savePlayer(playerName, playerId) {
+            this.savedPlayers[playerId] = {
+                name: playerName,
+                saved: Date.now()
+            };
+            this.saveSavedPlayers();
+        }
+
+        removeSavedPlayer(playerId) {
+            delete this.savedPlayers[playerId];
+            this.saveSavedPlayers();
+        }
+
+        loadRecentAlerts() {
+            try {
+                return JSON.parse(localStorage.getItem(RECENT_ALERTS_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        saveRecentAlerts() {
+            localStorage.setItem(RECENT_ALERTS_KEY, JSON.stringify(this.recentAlerts));
+        }
+
+        addRecentAlert(playerName, playerId, action) {
+            const alertId = `${playerId}_${action}_${Date.now()}`;
+            this.recentAlerts[alertId] = {
+                playerName,
+                playerId,
+                action,
+                timestamp: Date.now(),
+                acknowledged: false
+            };
+            this.saveRecentAlerts();
+            this.updateRecentAlertsDisplay();
+            this.startAlertReminders();
+        }
+
+        acknowledgeAlert(alertId) {
+            if (this.recentAlerts[alertId]) {
+                this.recentAlerts[alertId].acknowledged = true;
+                this.saveRecentAlerts();
+                this.updateRecentAlertsDisplay();
+                
+                // Check if all alerts are acknowledged
+                const unacknowledged = Object.values(this.recentAlerts).filter(alert => !alert.acknowledged);
+                if (unacknowledged.length === 0) {
+                    this.stopAlertReminders();
+                    // Trigger reorder when all alerts are acknowledged
+                    setTimeout(() => this.reorderSectionsIfNeeded(), 100);
+                }
+            }
+        }
+
+        clearOldAlerts() {
+            const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+            Object.keys(this.recentAlerts).forEach(alertId => {
+                if (this.recentAlerts[alertId].timestamp < oneDayAgo) {
+                    delete this.recentAlerts[alertId];
+                }
+            });
+            this.saveRecentAlerts();
+        }
+
+        startAlertReminders() {
+            if (alertReminderInterval || this.settings.repeatAlerts === false) return;
+            
+            alertReminderInterval = setInterval(() => {
+                const unacknowledged = Object.values(this.recentAlerts).filter(alert => !alert.acknowledged);
+                if (unacknowledged.length > 0 && this.soundEnabled && this.settings.repeatAlerts !== false) {
+                    this.playAlertSound();
+                }
+            }, 60000); // Every 1 minute
+        }
+
+        stopAlertReminders() {
+            if (alertReminderInterval) {
+                clearInterval(alertReminderInterval);
+                alertReminderInterval = null;
+            }
+        }
+
+        loadPlayerDatabase() {
+            try {
+                const saved = localStorage.getItem(PLAYER_DATABASE_KEY);
+                if (saved) {
+                    // Use async parsing for large databases to prevent UI blocking
+                    const database = JSON.parse(saved);
+                    const playerCount = Object.keys(database).length;
+                    console.log(`Loaded ${playerCount} players from database`);
+                    
+                    // If database is large, defer some processing
+                    if (playerCount > 1000) {
+                        console.log('Large database detected, optimizing performance...');
+                        this.optimizeLargeDatabase(database);
+                    }
+                    
+                    return database;
+                }
+                return {};
+            } catch (e) {
+                console.error('Failed to load player database:', e);
+                return {};
+            }
+        }
+
+        optimizeLargeDatabase(database) {
+            // Clean up old entries to keep database manageable
+            const oneMonthAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+            let cleanedCount = 0;
+            
+            Object.keys(database).forEach(playerId => {
+                const player = database[playerId];
+                if (player.lastSeen && player.lastSeen < oneMonthAgo && !player.isAlerted) {
+                    delete database[playerId];
+                    cleanedCount++;
+                }
+            });
+            
+            if (cleanedCount > 0) {
+                console.log(`Cleaned ${cleanedCount} old entries from database`);
+                this.playerDatabase = database;
+                this.savePlayerDatabase();
+            }
+        }
+
+        savePlayerDatabase() {
+            // Debounce database saves to reduce localStorage writes
+            clearTimeout(this.databaseSaveTimeout);
+            this.databaseSaveTimeout = setTimeout(() => {
+                try {
+                    // For large databases, save in chunks to prevent blocking
+                    const playerCount = Object.keys(this.playerDatabase).length;
+                    if (playerCount > 2000) {
+                        this.savePlayerDatabaseChunked();
+                    } else {
+                        localStorage.setItem(PLAYER_DATABASE_KEY, JSON.stringify(this.playerDatabase));
+                        console.log('Player database saved to localStorage');
+                    }
+                } catch (e) {
+                    console.error('Failed to save player database:', e);
+                }
+            }, 2000);
+        }
+
+        savePlayerDatabaseChunked() {
+            // Save large databases in smaller operations to prevent UI blocking
+            try {
+                const jsonString = JSON.stringify(this.playerDatabase);
+                localStorage.setItem(PLAYER_DATABASE_KEY, jsonString);
+                console.log(`Large player database saved (${Object.keys(this.playerDatabase).length} players)`);
+            } catch (e) {
+                console.error('Failed to save large player database:', e);
+                // Try to clean up and save again
+                this.optimizeLargeDatabase(this.playerDatabase);
+            }
+        }
+
+        loadPopulationHistory() {
+            try {
+                const saved = localStorage.getItem(POPULATION_HISTORY_KEY);
+                if (saved) {
+                    const history = JSON.parse(saved);
+                    // Keep only last 24 hours of data
+                    const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+                    const filteredHistory = history.filter(entry => entry.timestamp > oneDayAgo);
+                    
+                    console.log(`Loaded population history: ${filteredHistory.length} entries from last 24 hours`);
+                    if (filteredHistory.length > 0) {
+                        const oldest = new Date(filteredHistory[0].timestamp).toLocaleString();
+                        const newest = new Date(filteredHistory[filteredHistory.length - 1].timestamp).toLocaleString();
+                        console.log(`Population data range: ${oldest} to ${newest}`);
+                    }
+                    
+                    return filteredHistory;
+                }
+                console.log('No population history found in localStorage');
+                return [];
+            } catch (e) {
+                console.error('Failed to load population history:', e);
+                return [];
+            }
+        }
+
+        savePopulationHistory() {
+            try {
+                // Keep only last 24 hours of data
+                const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+                const beforeCount = this.populationHistory.length;
+                this.populationHistory = this.populationHistory.filter(entry => entry.timestamp > oneDayAgo);
+                const afterCount = this.populationHistory.length;
+                
+                localStorage.setItem(POPULATION_HISTORY_KEY, JSON.stringify(this.populationHistory));
+                
+                if (beforeCount !== afterCount) {
+                    console.log(`Population history cleaned: ${beforeCount} -> ${afterCount} entries`);
+                }
+            } catch (e) {
+                console.error('Failed to save population history:', e);
+            }
+        }
+
+        getActualPopulationFromUI() {
+            // Method 1: Look for "X/Y" pattern (current/max) and take the first number
+            try {
+                const allText = document.body.textContent;
+                const ratioMatches = allText.match(/(\d+)\/(\d+)/g);
+                if (ratioMatches) {
+                    for (const ratio of ratioMatches) {
+                        const [current, max] = ratio.split('/').map(n => parseInt(n));
+                        // Look for reasonable server population ratios
+                        if (current >= 0 && current <= max && max >= 50 && max <= 500) {
+                            console.log(`Found population ratio: ${current}/${max}`);
+                            return current;
+                        }
+                    }
+                }
+            } catch (e) {
+                // Continue
+            }
+            
+            // Method 2: Count actual player rows in the table (most reliable)
+            try {
+                const playerRows = document.querySelectorAll('table tbody tr');
+                let visibleRows = 0;
+                playerRows.forEach(row => {
+                    const nameCell = row.querySelector('td:first-child a');
+                    if (nameCell && nameCell.textContent.trim() && nameCell.href && nameCell.href.includes('/players/')) {
+                        visibleRows++;
+                    }
+                });
+                
+                if (visibleRows > 0) {
+                    console.log(`Counted ${visibleRows} player rows in table`);
+                    return visibleRows;
+                }
+            } catch (e) {
+                // Continue
+            }
+            
+            // Method 3: Look for population in page title
+            try {
+                const title = document.title;
+                const match = title.match(/(\d+)\/(\d+)/);
+                if (match) {
+                    const current = parseInt(match[1]);
+                    const max = parseInt(match[2]);
+                    if (current <= max && max >= 50 && max <= 500) {
+                        console.log(`Found population in title: ${current}/${max}`);
+                        return current;
+                    }
+                }
+            } catch (e) {
+                // Continue
+            }
+            
+            // Method 4: Look for specific BattleMetrics elements (be very selective)
+            const specificSelectors = [
+                'span[data-testid="server-population"]',
+                '.server-population .current',
+                '[class*="population"] .current'
+            ];
+            
+            for (const selector of specificSelectors) {
+                try {
+                    const element = document.querySelector(selector);
+                    if (element) {
+                        const text = element.textContent.trim();
+                        const match = text.match(/^(\d+)$/);
+                        if (match) {
+                            const count = parseInt(match[1]);
+                            if (count >= 0 && count <= 200) { // Be conservative
+                                console.log(`Found population via specific selector "${selector}": ${count}`);
+                                return count;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Continue
+                }
+            }
+            
+            console.log('Could not find actual population from UI, will use tracked count');
+            return null; // Could not find actual population
+        }
+
+        recordPopulation(trackedCount) {
+            const now = Date.now();
+            
+            // Try to get the actual population from BattleMetrics UI
+            const actualPopulation = this.getActualPopulationFromUI();
+            
+            // Use actual population if available AND it makes sense, otherwise fall back to tracked count
+            let populationToRecord = trackedCount;
+            
+            if (actualPopulation !== null) {
+                // Only use actual population if it's reasonably close to tracked count
+                // This prevents using wrong numbers like server capacity
+                const difference = Math.abs(actualPopulation - trackedCount);
+                
+                if (difference <= 5 || trackedCount === 0) {
+                    // Small difference or first run - use actual
+                    populationToRecord = actualPopulation;
+                    
+                    if (difference > 0) {
+                        console.log(`Population sync: Tracked=${trackedCount}, Actual=${actualPopulation}, Using actual (diff: ${difference})`);
+                    }
+                    
+                    // Update our tracked count to match actual
+                    currentPopulation = actualPopulation;
+                } else {
+                    // Large difference - probably wrong UI element, stick with tracked
+                    console.log(`Population mismatch too large: Tracked=${trackedCount}, UI=${actualPopulation}, Using tracked (diff: ${difference})`);
+                    populationToRecord = trackedCount;
+                }
+            } else {
+                console.log(`Using tracked population: ${trackedCount} (could not find actual UI count)`);
+            }
+            
+            const entry = {
+                timestamp: now,
+                count: populationToRecord,
+                trackedCount: trackedCount, // Keep for debugging
+                actualCount: actualPopulation, // Keep for debugging
+                date: new Date(now).toLocaleString()
+            };
+            
+            this.populationHistory.push(entry);
+            
+            // Log for debugging
+            console.log(`Population recorded: ${populationToRecord} players at ${entry.date}`);
+            
+            // Calculate last hour change and prediction
+            this.calculatePopulationStats();
+            this.savePopulationHistory();
+            this.updatePopulationDisplay();
+        }
+
+        loadLastPlayerState() {
+            try {
+                const saved = localStorage.getItem(LAST_PLAYER_STATE_KEY);
+                if (saved) {
+                    const state = JSON.parse(saved);
+                    // Only use state if it's recent (within last 5 minutes)
+                    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+                    if (state.timestamp > fiveMinutesAgo) {
+                        return new Map(state.players);
+                    }
+                }
+                return new Map();
+            } catch (e) {
+                console.error('Failed to load last player state:', e);
+                return new Map();
+            }
+        }
+
+        saveLastPlayerState() {
+            try {
+                const state = {
+                    timestamp: Date.now(),
+                    players: Array.from(this.currentPlayers.entries())
+                };
+                localStorage.setItem(LAST_PLAYER_STATE_KEY, JSON.stringify(state));
+            } catch (e) {
+                console.error('Failed to save last player state:', e);
+            }
+        }
+
+        calculatePopulationStats() {
+            const now = Date.now();
+            const twoHoursAgo = now - (2 * 60 * 60 * 1000);
+            const oneHourAgo = now - (60 * 60 * 1000);
+            
+            // Get current population - try to use actual UI count first
+            const actualPopulation = this.getActualPopulationFromUI();
+            if (actualPopulation !== null) {
+                currentPopulation = actualPopulation;
+                
+                // Sync our tracked players if there's a significant discrepancy
+                if (Math.abs(actualPopulation - this.currentPlayers.size) > 2) {
+                    console.log(`Large population discrepancy detected: Tracked=${this.currentPlayers.size}, Actual=${actualPopulation}`);
+                    // Don't clear the player list, but note the discrepancy
+                }
+            } else {
+                currentPopulation = this.currentPlayers.size;
+            }
+            
+            // Get last 2 hours of data for better prediction
+            const recentHistory = this.populationHistory.filter(entry => entry.timestamp >= twoHoursAgo);
+            
+            console.log(`Population stats calculation: Current=${currentPopulation}, History entries=${recentHistory.length}, Total history=${this.populationHistory.length}`);
+            
+            if (recentHistory.length < 2) {
+                // Not enough data, predict same as current
+                lastHourChange = 0;
+                predictedNextHour = currentPopulation;
+                console.log('Not enough historical data for prediction');
+                return;
+            }
+            
+            // Find population from one hour ago
+            const oneHourAgoEntry = recentHistory
+                .filter(entry => entry.timestamp >= oneHourAgo - 300000) // 5 min buffer
+                .sort((a, b) => Math.abs(a.timestamp - oneHourAgo) - Math.abs(b.timestamp - oneHourAgo))[0];
+            
+            if (oneHourAgoEntry) {
+                lastHourChange = currentPopulation - oneHourAgoEntry.count;
+            } else {
+                lastHourChange = 0;
+            }
+            
+            // Advanced prediction using weighted average of recent trends
+            const weights = [];
+            const changes = [];
+            
+            // Calculate 15-minute interval changes over last 2 hours
+            for (let i = 15; i <= 120; i += 15) {
+                const timeAgo = now - (i * 60 * 1000);
+                const entry = recentHistory
+                    .filter(e => e.timestamp >= timeAgo - 120000) // 2 min buffer
+                    .sort((a, b) => Math.abs(a.timestamp - timeAgo) - Math.abs(b.timestamp - timeAgo))[0];
+                
+                if (entry) {
+                    const change = currentPopulation - entry.count;
+                    const intervalHours = i / 60;
+                    const hourlyRate = change / intervalHours;
+                    
+                    // Weight recent changes more heavily
+                    const weight = Math.pow(0.8, (i / 15) - 1); // Exponential decay
+                    weights.push(weight);
+                    changes.push(hourlyRate);
+                }
+            }
+            
+            if (changes.length > 0) {
+                // Calculate weighted average of hourly rates
+                const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+                const weightedAverage = changes.reduce((sum, change, i) => sum + (change * weights[i]), 0) / totalWeight;
+                
+                // Apply some smoothing to avoid wild predictions
+                const smoothedPrediction = weightedAverage * 0.7 + (lastHourChange * 0.3);
+                predictedNextHour = Math.max(0, Math.round(currentPopulation + smoothedPrediction));
+            } else {
+                // Fallback to simple trend
+                predictedNextHour = Math.max(0, Math.round(currentPopulation + lastHourChange));
+            }
+        }
+
+        updatePopulationDisplay() {
+            const popDisplay = document.getElementById('population-stats');
+            if (!popDisplay) return;
+            
+            const changeColor = lastHourChange > 0 ? '#28a745' : lastHourChange < 0 ? '#dc3545' : '#6c757d';
+            const changeSymbol = lastHourChange > 0 ? '+' : '';
+            
+            const lastUpdated = new Date().toLocaleTimeString();
+            const historyCount = this.populationHistory.length;
+            const oldestEntry = this.populationHistory.length > 0 ? 
+                new Date(this.populationHistory[0].timestamp).toLocaleTimeString() : 'None';
+            
+            popDisplay.innerHTML = `
+                <div style="background: rgba(111, 66, 193, 0.1); padding: 10px; border-radius: 5px; margin-bottom: 10px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                        <div style="color: #6f42c1; font-weight: bold; font-size: 14px;">
+                            Population Stats
+                        </div>
+                        <div style="color: #6c757d; font-size: 10px;">
+                            Updated: ${lastUpdated}
+                        </div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <div style="color: white; font-size: 18px; font-weight: bold;">
+                                ${currentPopulation} players
+                            </div>
+                            <div style="color: ${changeColor}; font-size: 12px;">
+                                ${changeSymbol}${lastHourChange} in the past hour
+                            </div>
+                            <div style="color: #6c757d; font-size: 10px;">
+                                Data points: ${historyCount} | Oldest: ${oldestEntry}
+                            </div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="color: #17a2b8; font-size: 12px;">
+                                Predicted next hour:
+                            </div>
+                            <div style="color: #17a2b8; font-size: 14px; font-weight: bold;">
+                                ${predictedNextHour} players
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        refreshTimestamps() {
+            // Refresh database display timestamps
+            this.updateDatabaseDisplay();
+            
+            // Refresh activity log timestamps
+            this.updateActivityDisplay();
+            
+            // Refresh recent alerts timestamps
+            this.updateRecentAlertsDisplay();
+        }
+
+        addToDatabase(playerId, playerName, skipDisplayUpdate = false) {
+            const now = Date.now();
+            let needsUpdate = false;
+            
+            if (this.playerDatabase[playerId]) {
+                // Player exists, check for name change
+                const existing = this.playerDatabase[playerId];
+                if (existing.currentName !== playerName) {
+                    // Name changed
+                    existing.previousNames = existing.previousNames || [];
+                    if (!existing.previousNames.includes(existing.currentName)) {
+                        existing.previousNames.push(existing.currentName);
+                    }
+                    existing.currentName = playerName;
+                    existing.nameChanged = true;
+                    existing.lastNameChange = now;
+                    needsUpdate = true;
+                }
+                existing.lastSeen = now;
+            } else {
+                // New player
+                this.playerDatabase[playerId] = {
+                    id: playerId,
+                    currentName: playerName,
+                    originalName: playerName,
+                    firstSeen: now,
+                    lastSeen: now,
+                    nameChanged: false,
+                    previousNames: []
+                };
+                needsUpdate = true;
+            }
+            
+            // Only save and update display if there were significant changes
+            if (needsUpdate) {
+                this.savePlayerDatabase();
+                
+                // Skip display updates during batch operations (initial load)
+                if (!skipDisplayUpdate) {
+                    // Debounce database display updates
+                    clearTimeout(this.databaseUpdateTimeout);
+                    this.databaseUpdateTimeout = setTimeout(() => {
+                        this.updateDatabaseDisplay();
+                    }, 1000);
+                }
+            }
+        }
+
+        updateDatabaseDisplay() {
+            const databaseDiv = document.getElementById('player-database-list');
+            if (!databaseDiv) return;
+
+            // Don't update if user is actively searching - preserve search results
+            if (activeDatabaseSearch && activeDatabaseSearch.length >= 2) {
+                return;
+            }
+
+            // Only show if database section is visible to save performance
+            const databaseSection = document.getElementById('player-database-list').parentElement;
+            if (databaseSection && databaseSection.style.display === 'none') return;
+
+            // Sort by online status first, then by last seen
+            const players = Object.values(this.playerDatabase)
+                .sort((a, b) => {
+                    const aOnline = this.currentPlayers.has(a.id);
+                    const bOnline = this.currentPlayers.has(b.id);
+                    
+                    // Online players first
+                    if (aOnline && !bOnline) return -1;
+                    if (!aOnline && bOnline) return 1;
+                    
+                    // Then by last seen
+                    return b.lastSeen - a.lastSeen;
+                }); // Show all players - no limit
+            
+            if (players.length === 0) {
+                databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players in database</div>';
+                return;
+            }
+
+            this.renderDatabasePlayers(players, databaseDiv);
+        }
+
+        renderDatabasePlayers(players, container, page = 0) {
+            const playersPerPage = 20; // Reduced from showing all results
+            const startIndex = page * playersPerPage;
+            const endIndex = Math.min(startIndex + playersPerPage, players.length);
+            const currentPlayers = players.slice(startIndex, endIndex);
+            const totalPages = Math.ceil(players.length / playersPerPage);
+            
+            // Use document fragment for better performance
+            const fragment = document.createDocumentFragment();
+            
+            // Add pagination info if there are multiple pages
+            if (totalPages > 1) {
+                const paginationInfo = document.createElement('div');
+                paginationInfo.style.cssText = 'text-align: center; margin-bottom: 10px; font-size: 11px; opacity: 0.8;';
+                paginationInfo.innerHTML = `
+                    Showing ${startIndex + 1}-${endIndex} of ${players.length} results (Page ${page + 1}/${totalPages})
+                    <div style="margin-top: 5px;">
+                        <button onclick="renderDatabasePage(${page - 1})" ${page === 0 ? 'disabled' : ''} 
+                                style="background: #6c757d; color: white; border: none; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin: 0 2px;">
+                            ← Prev
+                        </button>
+                        <button onclick="renderDatabasePage(${page + 1})" ${page >= totalPages - 1 ? 'disabled' : ''} 
+                                style="background: #6c757d; color: white; border: none; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin: 0 2px;">
+                            Next →
+                        </button>
+                    </div>
+                `;
+                fragment.appendChild(paginationInfo);
+            }
+            
+            // Render players in batches to prevent UI blocking
+            const renderBatch = (batchStart, batchSize = 5) => {
+                const batchEnd = Math.min(batchStart + batchSize, currentPlayers.length);
+                
+                for (let i = batchStart; i < batchEnd; i++) {
+                    const player = currentPlayers[i];
+                    const playerDiv = this.createPlayerElement(player);
+                    fragment.appendChild(playerDiv);
+                }
+                
+                if (batchEnd < currentPlayers.length) {
+                    // Continue with next batch after a small delay
+                    setTimeout(() => renderBatch(batchEnd), 0);
+                } else {
+                    // All done, append to container
+                    container.innerHTML = '';
+                    container.appendChild(fragment);
+                }
+            };
+            
+            // Start rendering in batches
+            renderBatch(0);
+        }
+
+        createPlayerElement(player) {
+            const lastSeenTime = toRelativeTime(player.lastSeen);
+            const hasAlert = this.alerts[player.id];
+            const isSaved = this.savedPlayers[player.id];
+            const isOnline = this.currentPlayers.has(player.id);
+            
+            let nameDisplay = player.currentName;
+            if (player.nameChanged && player.previousNames.length > 0) {
+                nameDisplay = `${player.currentName} (was: ${player.previousNames[player.previousNames.length - 1]})`;
+            }
+            
+            const onlineStatus = isOnline ? 
+                '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
+                '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
+            
+            const playerDiv = document.createElement('div');
+            playerDiv.style.cssText = `display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(111, 66, 193, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#6f42c1'};`;
+            
+            playerDiv.innerHTML = `
+                <div style="flex: 1;">
+                    <div style="color: #6f42c1; font-weight: bold; font-size: 12px;">
+                        ${nameDisplay} ${onlineStatus}
+                        ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                        ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                    </div>
+                    <div style="opacity: 0.7; font-size: 10px;">
+                        ID: ${player.id} | Last seen: ${lastSeenTime}
+                    </div>
+                    ${player.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
+                </div>
+                <div style="display: flex; gap: 3px; flex-wrap: wrap;">
+                    <button onclick="window.open('https://www.battlemetrics.com/players/${player.id}', '_blank')" 
+                            style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                            title="View Profile">
+                        Profile
+                    </button>
+                    <button onclick="togglePlayerAlert('${player.currentName}', '${player.id}')" 
+                            style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                            title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
+                        ${hasAlert ? 'Remove' : 'Add Alert'}
+                    </button>
+                    <button onclick="savePlayer('${player.currentName}', '${player.id}')" 
+                            style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                            title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
+                        ${isSaved ? 'Saved' : 'Save'}
+                    </button>
+                </div>
+            `;
+            
+            return playerDiv;
+        }
+
+        searchDatabase(query) {
+            if (!query || query.length < 2) return [];
+            
+            const lowerQuery = query.toLowerCase();
+            const results = [];
+            const exactMatches = [];
+            const partialMatches = [];
+            const maxResults = 100; // Increased from 50
+            let searchCount = 0;
+            
+            // For small queries (2-3 chars), search more entries
+            // For longer queries, we can be more restrictive
+            const maxSearchCount = query.length <= 3 ? 2000 : 3000;
+            
+            console.log(`Searching database for "${query}" (max ${maxSearchCount} entries, max ${maxResults} results)`);
+            
+            // Use for...of loop for better performance
+            for (const player of Object.values(this.playerDatabase)) {
+                searchCount++;
+                let matchFound = false;
+                let isExactMatch = false;
+                
+                // Check current name
+                if (player.currentName && player.currentName.toLowerCase().includes(lowerQuery)) {
+                    matchFound = true;
+                    // Check if it's an exact match or starts with query
+                    if (player.currentName.toLowerCase() === lowerQuery || 
+                        player.currentName.toLowerCase().startsWith(lowerQuery)) {
+                        isExactMatch = true;
+                    }
+                }
+                
+                // Check original name if not already matched
+                if (!matchFound && player.originalName && player.originalName.toLowerCase().includes(lowerQuery)) {
+                    matchFound = true;
+                    if (player.originalName.toLowerCase() === lowerQuery || 
+                        player.originalName.toLowerCase().startsWith(lowerQuery)) {
+                        isExactMatch = true;
+                    }
+                }
+                
+                // Check player ID
+                if (!matchFound && player.id && player.id.includes(query)) {
+                    matchFound = true;
+                    isExactMatch = true; // ID matches are considered exact
+                }
+                
+                // Check previous names if not already matched
+                if (!matchFound && player.previousNames && player.previousNames.length > 0) {
+                    for (const name of player.previousNames) {
+                        if (name && name.toLowerCase().includes(lowerQuery)) {
+                            matchFound = true;
+                            if (name.toLowerCase() === lowerQuery || 
+                                name.toLowerCase().startsWith(lowerQuery)) {
+                                isExactMatch = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                
+                // Add to appropriate results array
+                if (matchFound) {
+                    if (isExactMatch) {
+                        exactMatches.push(player);
+                    } else {
+                        partialMatches.push(player);
+                    }
+                }
+                
+                // Only stop if we have enough results AND we've searched a reasonable amount
+                if ((exactMatches.length + partialMatches.length) >= maxResults && searchCount >= 500) {
+                    console.log(`Search stopped early: found ${exactMatches.length + partialMatches.length} results after ${searchCount} entries`);
+                    break;
+                }
+                
+                // Hard limit to prevent infinite searching
+                if (searchCount >= maxSearchCount) {
+                    console.log(`Search completed: searched ${searchCount} entries, found ${exactMatches.length + partialMatches.length} results`);
+                    break;
+                }
+            }
+            
+            // Combine results: exact matches first, then partial matches
+            const combinedResults = [...exactMatches, ...partialMatches].slice(0, maxResults);
+            
+            console.log(`Search results for "${query}": ${exactMatches.length} exact matches, ${partialMatches.length} partial matches, ${combinedResults.length} total returned`);
+            
+            return combinedResults;
+        }
+
+        // Debug function to find a specific player and show detailed info
+        debugFindPlayer(playerName) {
+            const lowerName = playerName.toLowerCase();
+            let found = [];
+            let searchCount = 0;
+            
+            console.log(`🔍 DEBUG: Searching for player "${playerName}" in ${Object.keys(this.playerDatabase).length} total players`);
+            
+            for (const [playerId, player] of Object.entries(this.playerDatabase)) {
+                searchCount++;
+                let matchType = null;
+                
+                if (player.currentName && player.currentName.toLowerCase().includes(lowerName)) {
+                    matchType = 'currentName';
+                } else if (player.originalName && player.originalName.toLowerCase().includes(lowerName)) {
+                    matchType = 'originalName';
+                } else if (player.previousNames && player.previousNames.length > 0) {
+                    for (const name of player.previousNames) {
+                        if (name && name.toLowerCase().includes(lowerName)) {
+                            matchType = 'previousName';
+                            break;
+                        }
+                    }
+                }
+                
+                if (matchType) {
+                    found.push({
+                        player,
+                        matchType,
+                        searchPosition: searchCount
+                    });
+                }
+            }
+            
+            console.log(`🔍 DEBUG: Found ${found.length} matches for "${playerName}":`);
+            found.forEach((match, index) => {
+                console.log(`  ${index + 1}. ${match.player.currentName} (ID: ${match.player.id})`);
+                console.log(`     Match type: ${match.matchType}`);
+                console.log(`     Search position: ${match.searchPosition}`);
+                console.log(`     Original name: ${match.player.originalName}`);
+                console.log(`     Previous names: ${match.player.previousNames ? match.player.previousNames.join(', ') : 'none'}`);
+                console.log(`     Last seen: ${new Date(match.player.lastSeen).toLocaleString()}`);
+                console.log('     ---');
+            });
+            
+            return found;
+        }
+
+        addAlert(playerName, playerId, alertType = 'both') {
+            try {
+                console.log('[Alert System] Adding alert for:', playerName, playerId);
+                this.alerts[playerId] = {
+                    name: playerName,
+                    type: alertType, // 'join', 'leave', 'both'
+                    added: Date.now()
+                };
+                this.saveAlerts();
+                console.log('[Alert System] Alert added. Total alerts:', Object.keys(this.alerts).length);
+                console.log('[Alert System] Current alerts:', this.alerts);
+                
+                // Clear search caches since alert status changed
+                // clearAllSearchCaches(); // Temporarily disabled
+                
+                // Immediately update the display
+                console.log('[Alert System] Calling updateAlertDisplay...');
+                this.updateAlertDisplay();
+                
+                console.log('[Alert System] Calling updateAlertCount...');
+                this.updateAlertCount();
+                
+                // Ensure Alert Players section is expanded when alert is added
+                console.log('[Alert System] Calling expandAlertSection...');
+                this.expandAlertSection();
+                
+                console.log('[Alert System] addAlert completed successfully');
+            } catch (error) {
+                console.error('[Alert System] Error in addAlert:', error);
+            }
+        }
+
+        removeAlert(playerId) {
+            console.log('[Alert System] Removing alert for:', playerId);
+            delete this.alerts[playerId];
+            this.saveAlerts();
+            console.log('[Alert System] Alert removed. Total alerts:', Object.keys(this.alerts).length);
+            
+            // Clear search caches since alert status changed
+            // clearAllSearchCaches(); // Temporarily disabled
+            
+            // Immediately update the display
+            this.updateAlertDisplay();
+            this.updateAlertCount();
+        }
+
+        logActivity(playerName, playerId, action) {
+            const entry = {
+                timestamp: Date.now(),
+                playerName,
+                playerId,
+                action, // 'joined' or 'left'
+                serverName: currentServerName,
+                time: new Date().toLocaleString()
+            };
+            this.activityLog.push(entry);
+            this.saveActivityLog();
+
+            // Check if we should alert for this player
+            const alert = this.alerts[playerId];
+            if (alert && (alert.type === 'both' || alert.type === action.replace('ed', ''))) {
+                this.showAlert(playerName, action);
+                this.addRecentAlert(playerName, playerId, action);
+                if (this.soundEnabled) {
+                    this.playAlertSound();
+                }
+            }
+
+            // Debounce activity display updates to reduce lag
+            clearTimeout(this.activityUpdateTimeout);
+            this.activityUpdateTimeout = setTimeout(() => {
+                this.updateActivityDisplay();
+            }, 500);
+        }
+
+        showAlert(playerName, action) {
+            const alertDiv = document.createElement('div');
+            alertDiv.style.cssText = `
+                position: fixed;
+                top: 20px;
+                left: 50%;
+                transform: translateX(-50%);
+                background: ${action === 'joined' ? '#28a745' : '#dc3545'};
+                color: white;
+                padding: 12px 20px;
+                border-radius: 8px;
+                z-index: 10001;
+                font-size: 14px;
+                font-weight: bold;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                animation: slideDown 0.3s ease-out;
+            `;
+            
+            alertDiv.innerHTML = `
+                <div>${playerName} ${action} the game</div>
+                <div style="font-size: 12px; opacity: 0.9; margin-top: 4px;">${toRelativeTime(Date.now())}</div>
+            `;
+
+            // Add CSS animation if not exists
+            if (!document.getElementById('alert-animations')) {
+                const style = document.createElement('style');
+                style.id = 'alert-animations';
+                style.textContent = `
+                    @keyframes slideDown {
+                        from { transform: translateX(-50%) translateY(-100%); opacity: 0; }
+                        to { transform: translateX(-50%) translateY(0); opacity: 1; }
+                    }
+                `;
+                document.head.appendChild(style);
+            }
+
+            document.body.appendChild(alertDiv);
+
+            setTimeout(() => {
+                alertDiv.style.animation = 'slideDown 0.3s ease-out reverse';
+                setTimeout(() => alertDiv.remove(), 300);
+            }, 4000);
+        }
+
+        async playAlertSound() {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // Resume audio context if suspended (required by modern browsers)
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+                
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
+                oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+                
+                oscillator.start(audioContext.currentTime);
+                oscillator.stop(audioContext.currentTime + 0.5);
+                
+                console.log('Alert sound played successfully');
+            } catch (e) {
+                console.log('Could not play alert sound:', e);
+                // Fallback: try to use a simple beep
+                try {
+                    const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT');
+                    audio.volume = 0.3;
+                    audio.play();
+                } catch (fallbackError) {
+                    console.log('Fallback sound also failed:', fallbackError);
+                }
+            }
+        }
+
+        startMonitoring() {
+            if (this.isMonitoring) return;
+            
+            this.isMonitoring = true;
+            
+            // Show loading indicator
+            this.showLoadingIndicator();
+            
+            // Initial player list with optimized loading
+            this.updatePlayerList(true); // Pass true for initial load
+            
+            // Calculate initial population stats from loaded history
+            this.calculatePopulationStats();
+            
+            // Initial population display
+            this.updatePopulationDisplay();
+            
+            // Monitor every 10 seconds to reduce load
+            let syncCounter = 0;
+            monitoringInterval = setInterval(() => {
+                this.checkPlayerChanges();
+                
+                // Every 30 cycles (5 minutes), sync population to prevent drift
+                syncCounter++;
+                if (syncCounter >= 30) {
+                    this.syncPopulationCount();
+                    syncCounter = 0;
+                }
+            }, 10000);
+            
+            // Update population stats every minute for better predictions
+            populationStatsInterval = setInterval(() => {
+                this.calculatePopulationStats();
+                this.updatePopulationDisplay();
+            }, 60000); // 1 minute
+            
+            // Refresh timestamps every 30 seconds to keep "X minutes ago" current
+            timestampRefreshInterval = setInterval(() => {
+                this.refreshTimestamps();
+            }, 30000); // 30 seconds
+            
+            console.log('Started monitoring server:', currentServerID);
+        }
+
+        stopMonitoring() {
+            this.isMonitoring = false;
+            if (monitoringInterval) {
+                clearInterval(monitoringInterval);
+                monitoringInterval = null;
+            }
+            if (populationStatsInterval) {
+                clearInterval(populationStatsInterval);
+                populationStatsInterval = null;
+            }
+            if (timestampRefreshInterval) {
+                clearInterval(timestampRefreshInterval);
+                timestampRefreshInterval = null;
+            }
+            console.log('Stopped monitoring');
+        }
+
+        updatePlayerList(isInitialLoad = false) {
+            try {
+                const playerRows = document.querySelectorAll('table tbody tr');
+                const newPlayerList = new Map();
+                
+                // Batch process players to avoid blocking UI
+                const batchSize = isInitialLoad ? 50 : playerRows.length; // Process in smaller batches on initial load
+                let currentBatch = 0;
+                
+                const processBatch = () => {
+                    const startIndex = currentBatch * batchSize;
+                    const endIndex = Math.min(startIndex + batchSize, playerRows.length);
+                    
+                    // Process current batch
+                    for (let i = startIndex; i < endIndex; i++) {
+                        const row = playerRows[i];
+                        const nameCell = row.querySelector('td:first-child a');
+                        if (nameCell) {
+                            const playerName = nameCell.textContent.trim();
+                            const playerLink = nameCell.href;
+                            const playerId = playerLink.split('/players/')[1]?.split('/')[0];
+                            
+                            if (playerId && playerName) {
+                                newPlayerList.set(playerId, {
+                                    name: playerName,
+                                    id: playerId,
+                                    lastSeen: Date.now()
+                                });
+                                
+                                // Add to database (batched, skip display updates during initial load)
+                                this.addToDatabase(playerId, playerName, isInitialLoad);
+                            }
+                        }
+                    }
+                    
+                    currentBatch++;
+                    
+                    // If there are more batches, schedule next batch
+                    if (endIndex < playerRows.length) {
+                        // Use requestAnimationFrame for smooth processing
+                        requestAnimationFrame(processBatch);
+                        return;
+                    }
+                    
+                    // All batches processed, now handle the rest
+                    this.finishPlayerListUpdate(newPlayerList, isInitialLoad);
+                };
+                
+                // Start processing
+                if (isInitialLoad && playerRows.length > batchSize) {
+                    console.log(`Processing ${playerRows.length} players in batches of ${batchSize}...`);
+                    processBatch();
+                } else {
+                    // Process all at once for smaller lists or regular updates
+                    playerRows.forEach(row => {
+                        const nameCell = row.querySelector('td:first-child a');
+                        if (nameCell) {
+                            const playerName = nameCell.textContent.trim();
+                            const playerLink = nameCell.href;
+                            const playerId = playerLink.split('/players/')[1]?.split('/')[0];
+                            
+                            if (playerId && playerName) {
+                                newPlayerList.set(playerId, {
+                                    name: playerName,
+                                    id: playerId,
+                                    lastSeen: Date.now()
+                                });
+                                
+                                // Add to database
+                                this.addToDatabase(playerId, playerName, isInitialLoad);
+                            }
+                        }
+                    });
+                    
+                    this.finishPlayerListUpdate(newPlayerList, isInitialLoad);
+                }
+            } catch (e) {
+                console.error('Error updating player list:', e);
+            }
+        }
+        
+        finishPlayerListUpdate(newPlayerList, isInitialLoad) {
+            try {
+                // Check for changes
+                let comparisonList = lastPlayerList;
+                
+                // On first run, use last saved state if available
+                if (lastPlayerList.size === 0 && this.lastPlayerState.size > 0) {
+                    comparisonList = this.lastPlayerState;
+                    console.log('Using last saved player state for comparison');
+                }
+                
+                if (comparisonList.size > 0) {
+                    // Check for new joins
+                    newPlayerList.forEach((player, playerId) => {
+                        if (!comparisonList.has(playerId)) {
+                            this.logActivity(player.name, playerId, 'joined');
+                        }
+                    });
+
+                    // Check for leaves
+                    comparisonList.forEach((player, playerId) => {
+                        if (!newPlayerList.has(playerId)) {
+                            // Use player name from comparison list if available
+                            const playerName = player.name || player.playerName || `Player ${playerId}`;
+                            this.logActivity(playerName, playerId, 'left');
+                        }
+                    });
+                }
+
+                lastPlayerList = new Map(newPlayerList);
+                this.currentPlayers = new Map(newPlayerList);
+                
+                // Save current state for next page load
+                this.saveLastPlayerState();
+                
+                // Record population for tracking
+                this.recordPopulation(newPlayerList.size);
+                
+                // Debounce display updates during initial load to prevent lag
+                if (isInitialLoad) {
+                    this.scheduleDisplayUpdates();
+                } else {
+                    // Update all displays when player status changes (regular updates)
+                    this.updatePlayerDisplay();
+                    this.updateAlertDisplay();
+                    this.updateSavedPlayersDisplay();
+                }
+                
+                console.log(`Player list updated: ${newPlayerList.size} players processed`);
+            } catch (e) {
+                console.error('Error finishing player list update:', e);
+            }
+        }
+        
+        scheduleDisplayUpdates() {
+            // Clear any existing update timers
+            clearTimeout(this.displayUpdateTimeout);
+            
+            // Schedule display updates with a small delay to prevent blocking
+            this.displayUpdateTimeout = setTimeout(() => {
+                requestAnimationFrame(() => {
+                    this.updatePlayerDisplay();
+                    
+                    requestAnimationFrame(() => {
+                        this.updateAlertDisplay();
+                        
+                        requestAnimationFrame(() => {
+                            this.updateSavedPlayersDisplay();
+                            
+                            // Hide loading indicator when done
+                            this.hideLoadingIndicator();
+                        });
+                    });
+                });
+            }, 100);
+        }
+        
+        showLoadingIndicator() {
+            const playerListDiv = document.getElementById('current-players-list');
+            if (playerListDiv) {
+                playerListDiv.innerHTML = '<div style="text-align: center; padding: 20px; color: #ffc107;"><div style="font-size: 14px;">Loading players...</div><div style="font-size: 11px; opacity: 0.7; margin-top: 5px;">Processing large player list, please wait...</div></div>';
+            }
+        }
+        
+        hideLoadingIndicator() {
+            // Loading indicator will be replaced by actual content in updatePlayerDisplay
+            console.log('Initial loading completed');
+        }
+
+        syncPopulationCount() {
+            const actualPopulation = this.getActualPopulationFromUI();
+            const trackedPopulation = this.currentPlayers.size;
+            
+            if (actualPopulation !== null) {
+                const difference = Math.abs(actualPopulation - trackedPopulation);
+                
+                console.log(`Population sync check: Tracked=${trackedPopulation}, UI=${actualPopulation}, Difference=${difference}`);
+                
+                // Only sync if the difference is small (1-3 players) to avoid using wrong UI elements
+                if (difference >= 1 && difference <= 3) {
+                    console.log(`Small drift detected, correcting: ${trackedPopulation} -> ${actualPopulation}`);
+                    this.recordPopulation(trackedPopulation); // This will use actual population internally
+                } else if (difference > 3) {
+                    console.log(`Large difference detected, likely wrong UI element. Keeping tracked count.`);
+                }
+            }
+        }
+
+        checkPlayerChanges() {
+            this.updatePlayerList();
+        }
+
+        updatePlayerDisplay() {
+            const playerListDiv = document.getElementById('current-players-list');
+            if (!playerListDiv) return;
+
+            if (this.currentPlayers.size === 0) {
+                playerListDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players online</div>';
+                return;
+            }
+
+            // Use DocumentFragment for better performance with large player lists
+            const fragment = document.createDocumentFragment();
+            
+            for (const [playerId, player] of this.currentPlayers) {
+                
+                const isAlerted = this.alerts[playerId];
+                
+                const playerDiv = document.createElement('div');
+                playerDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1);';
+                
+                const playerInfo = document.createElement('div');
+                playerInfo.style.cssText = 'flex: 1;';
+                
+                const playerLink = document.createElement('a');
+                playerLink.href = `https://www.battlemetrics.com/players/${playerId}`;
+                playerLink.target = '_blank';
+                playerLink.style.cssText = 'color: #17a2b8; text-decoration: none;';
+                playerLink.textContent = player.name;
+                
+                playerInfo.appendChild(playerLink);
+                
+                if (isAlerted) {
+                    const alertSpan = document.createElement('span');
+                    alertSpan.style.cssText = 'color: #ffc107; margin-left: 5px;';
+                    alertSpan.textContent = '[ALERT]';
+                    playerInfo.appendChild(alertSpan);
+                }
+                
+                const buttonsDiv = document.createElement('div');
+                buttonsDiv.style.cssText = 'display: flex; gap: 5px;';
+                
+                const alertBtn = document.createElement('button');
+                alertBtn.textContent = isAlerted ? 'Remove' : 'Add Alert';
+                alertBtn.title = isAlerted ? 'Remove Alert' : 'Add Alert';
+                alertBtn.style.cssText = `background: ${isAlerted ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;`;
+                alertBtn.onclick = () => togglePlayerAlert(player.name, playerId);
+                
+                const saveBtn = document.createElement('button');
+                saveBtn.textContent = 'Save';
+                saveBtn.title = 'Save Player';
+                saveBtn.style.cssText = 'background: #6c757d; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;';
+                saveBtn.onclick = () => savePlayer(player.name, playerId);
+                
+                buttonsDiv.appendChild(alertBtn);
+                buttonsDiv.appendChild(saveBtn);
+                
+                playerDiv.appendChild(playerInfo);
+                playerDiv.appendChild(buttonsDiv);
+                fragment.appendChild(playerDiv);
+            }
+
+            // Clear and append all at once
+            playerListDiv.innerHTML = '';
+            playerListDiv.appendChild(fragment);
+        }
+
+        updateActivityDisplay() {
+            const activityDiv = document.getElementById('recent-activity-list');
+            if (!activityDiv) return;
+
+            // Check if there's an active filter and apply it
+            const filterSelect = document.getElementById('activity-filter');
+            if (filterSelect && filterSelect.value !== 'all') {
+                // Use the filter function to maintain current filter
+                window.filterActivity(filterSelect.value);
+                return;
+            }
+
+            // Default behavior - show all activity
+            const recentActivity = this.activityLog.slice(-100).reverse();
+            
+            if (recentActivity.length === 0) {
+                activityDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No recent activity</div>';
+                return;
+            }
+
+            let activityHTML = '';
+            recentActivity.forEach(entry => {
+                const timeAgo = toRelativeTime(entry.timestamp);
+                const actionColor = entry.action === 'joined' ? '#28a745' : '#dc3545';
+                const hasAlert = this.alerts[entry.playerId];
+                const isSaved = this.savedPlayers[entry.playerId];
+                
+                activityHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
+                        <div style="flex: 1;">
+                            <div style="color: ${actionColor}; font-weight: bold;">
+                                ${entry.playerName} ${entry.action} the game
+                                ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                                ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                            </div>
+                            <div style="opacity: 0.7; font-size: 11px;">${timeAgo} - ${entry.time} - ID: ${entry.playerId}</div>
+                        </div>
+                        <div style="display: flex; gap: 3px;">
+                            <button onclick="window.open('https://www.battlemetrics.com/players/${entry.playerId}', '_blank')" 
+                                    style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View Profile">
+                                Profile
+                            </button>
+                            <button onclick="togglePlayerAlert('${entry.playerName}', '${entry.playerId}')" 
+                                    style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
+                                ${hasAlert ? 'Remove' : 'Add Alert'}
+                            </button>
+                            <button onclick="savePlayer('${entry.playerName}', '${entry.playerId}')" 
+                                    style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
+                                ${isSaved ? 'Saved' : 'Save'}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            activityDiv.innerHTML = activityHTML;
+        }
+
+        updateAlertCount() {
+            const alertCountSpan = document.getElementById('alert-count');
+            if (alertCountSpan) {
+                const count = Object.keys(this.alerts).length;
+                alertCountSpan.textContent = count;
+                console.log('[Alert System] Updated alert count to:', count);
+            }
+        }
+
+        expandAlertSection() {
+            const alertList = document.getElementById('alert-players-list');
+            const alertToggle = document.getElementById('alertplayers-toggle');
+            
+            if (alertList && alertToggle) {
+                if (alertList.style.display === 'none') {
+                    alertList.style.display = 'block';
+                    alertToggle.textContent = '▼';
+                    console.log('[Alert System] Expanded Alert Players section');
+                }
+            }
+        }
+
+        updateAlertDisplay() {
+            try {
+                console.log('[Alert System] Updating alert display...');
+                const alertDiv = document.getElementById('alert-players-list');
+                if (!alertDiv) {
+                    console.log('[Alert System] Alert div not found!');
+                    return;
+                }
+
+                const alertedPlayers = Object.keys(this.alerts);
+                console.log('[Alert System] Alerted players count:', alertedPlayers.length);
+                console.log('[Alert System] Alerted players:', alertedPlayers);
+                
+                if (alertedPlayers.length === 0) {
+                    alertDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players with alerts</div>';
+                    console.log('[Alert System] No alerts to display');
+                    return;
+                }
+
+                console.log('[Alert System] Generating HTML for alerts...');
+                let alertHTML = '';
+                alertedPlayers.forEach(playerId => {
+                    const alert = this.alerts[playerId];
+                    const addedDate = new Date(alert.added).toLocaleDateString();
+                    const isOnline = this.currentPlayers.has(playerId);
+                    const dbPlayer = this.playerDatabase[playerId];
+                    const isSaved = this.savedPlayers[playerId];
+                    
+                    // Get current name and check for name changes
+                    let displayName = alert.name;
+                    let nameChangeInfo = '';
+                    
+                    if (dbPlayer) {
+                        displayName = dbPlayer.currentName;
+                        if (dbPlayer.nameChanged && dbPlayer.previousNames.length > 0) {
+                            const originalAlertName = alert.name;
+                            if (originalAlertName !== dbPlayer.currentName) {
+                                nameChangeInfo = ` (was: ${originalAlertName})`;
+                            }
+                        }
+                    }
+                    
+                    const onlineStatus = isOnline ? 
+                        '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
+                        '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
+                    
+                    alertHTML += `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(255, 193, 7, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#ffc107'};">
+                            <div style="flex: 1;">
+                                <div style="color: #ffc107; font-weight: bold; font-size: 12px;">
+                                    <a href="https://www.battlemetrics.com/players/${playerId}" target="_blank" style="color: #ffc107; text-decoration: none;">
+                                        ${displayName}${nameChangeInfo}
+                                    </a>
+                                    ${onlineStatus}
+                                    ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                                </div>
+                                <div style="opacity: 0.7; font-size: 10px;">
+                                    Added: ${addedDate} | ID: ${playerId}
+                                </div>
+                                ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
+                            </div>
+                            <div style="display: flex; gap: 3px;">
+                                <button onclick="window.open('https://www.battlemetrics.com/players/${playerId}', '_blank')" 
+                                        style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                        title="View Profile">
+                                    Profile
+                                </button>
+                                <button onclick="savePlayer('${displayName}', '${playerId}')" 
+                                        style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                        title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
+                                    ${isSaved ? 'Saved' : 'Save'}
+                                </button>
+                                <button onclick="togglePlayerAlert('${displayName}', '${playerId}')" 
+                                        style="background: #dc3545; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                        title="Remove Alert">
+                                    Remove
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                console.log('[Alert System] Setting innerHTML with', alertHTML.length, 'characters');
+                alertDiv.innerHTML = alertHTML;
+                console.log('[Alert System] Alert display updated successfully');
+                
+            } catch (error) {
+                console.error('[Alert System] Error in updateAlertDisplay:', error);
+                return;
+            }
+        }
+
+        updateSavedPlayersDisplay() {
+            const savedDiv = document.getElementById('saved-players-list');
+            if (!savedDiv) return;
+
+            const savedPlayers = Object.keys(this.savedPlayers);
+            
+            if (savedPlayers.length === 0) {
+                savedDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No saved players</div>';
+                return;
+            }
+
+            let savedHTML = '';
+            savedPlayers.forEach(playerId => {
+                const saved = this.savedPlayers[playerId];
+                const savedDate = new Date(saved.saved).toLocaleDateString();
+                const hasAlert = this.alerts[playerId];
+                const isOnline = this.currentPlayers.has(playerId);
+                const dbPlayer = this.playerDatabase[playerId];
+                
+                // Get current name and check for name changes
+                let displayName = saved.name;
+                let nameChangeInfo = '';
+                
+                if (dbPlayer) {
+                    displayName = dbPlayer.currentName;
+                    if (dbPlayer.nameChanged && dbPlayer.previousNames.length > 0) {
+                        const originalSavedName = saved.name;
+                        if (originalSavedName !== dbPlayer.currentName) {
+                            nameChangeInfo = ` (was: ${originalSavedName})`;
+                        }
+                    }
+                }
+                
+                const onlineStatus = isOnline ? 
+                    '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
+                    '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
+                
+                savedHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(108, 117, 125, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#6c757d'};">
+                        <div style="flex: 1;">
+                            <div style="color: #6c757d; font-weight: bold; font-size: 12px;">
+                                <a href="https://www.battlemetrics.com/players/${playerId}" target="_blank" style="color: #6c757d; text-decoration: none;">
+                                    ${displayName}${nameChangeInfo}
+                                </a>
+                                ${onlineStatus}
+                                ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                            </div>
+                            <div style="opacity: 0.7; font-size: 10px;">
+                                Saved: ${savedDate} | ID: ${playerId}
+                            </div>
+                            ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
+                        </div>
+                        <div style="display: flex; gap: 3px;">
+                            <button onclick="window.open('https://www.battlemetrics.com/players/${playerId}', '_blank')" 
+                                    style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View Profile">
+                                Profile
+                            </button>
+                            <button onclick="togglePlayerAlert('${displayName}', '${playerId}')" 
+                                    style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
+                                ${hasAlert ? 'Remove' : 'Add Alert'}
+                            </button>
+                            <button onclick="removeSavedPlayer('${playerId}')" 
+                                    style="background: #6c757d; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="Remove from Saved">
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            savedDiv.innerHTML = savedHTML;
+        }
+
+        updateRecentAlertsDisplay() {
+            const alertsDiv = document.getElementById('recent-alerts-list');
+            if (!alertsDiv) return;
+
+            // Clean old alerts first
+            this.clearOldAlerts();
+            
+            // Check if we need to reorder sections based on unacknowledged alerts
+            this.reorderSectionsIfNeeded();
+
+            const recentAlerts = Object.keys(this.recentAlerts)
+                .map(id => ({ id, ...this.recentAlerts[id] }))
+                .sort((a, b) => b.timestamp - a.timestamp);
+            
+            if (recentAlerts.length === 0) {
+                alertsDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No recent alerts</div>';
+                return;
+            }
+
+            let alertsHTML = '';
+            recentAlerts.forEach(alert => {
+                const timeAgo = toRelativeTime(alert.timestamp);
+                const actionColor = alert.action === 'joined' ? '#28a745' : '#dc3545';
+                const bgColor = alert.acknowledged ? 'rgba(108, 117, 125, 0.1)' : 'rgba(220, 53, 69, 0.1)';
+                const dbPlayer = this.playerDatabase[alert.playerId];
+                
+                // Get current name and check for name changes
+                let displayName = alert.playerName;
+                let nameChangeInfo = '';
+                
+                if (dbPlayer) {
+                    displayName = dbPlayer.currentName;
+                    if (dbPlayer.nameChanged && dbPlayer.previousNames.length > 0) {
+                        // Show the most recent previous name if current name is different from any previous name
+                        const mostRecentPreviousName = dbPlayer.previousNames[dbPlayer.previousNames.length - 1];
+                        
+                        // Check if the alert name is different from current name OR if we should show previous name
+                        if (alert.playerName !== dbPlayer.currentName) {
+                            nameChangeInfo = ` (was: ${alert.playerName})`;
+                        } else if (mostRecentPreviousName && mostRecentPreviousName !== dbPlayer.currentName) {
+                            nameChangeInfo = ` (was: ${mostRecentPreviousName})`;
+                        }
+                    }
+                }
+                
+                alertsHTML += `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: ${bgColor}; border-left: 3px solid ${actionColor};">
+                        <div style="flex: 1;">
+                            <div style="color: ${actionColor}; font-weight: bold; font-size: 12px;">
+                                ${displayName}${nameChangeInfo} ${alert.action} the game
+                            </div>
+                            <div style="opacity: 0.7; font-size: 10px;">${timeAgo} | ID: ${alert.playerId}</div>
+                            ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
+                            ${alert.acknowledged ? '<div style="color: #28a745; font-size: 10px;">✓ Acknowledged</div>' : '<div style="color: #ffc107; font-size: 10px;">⚠ Needs acknowledgment</div>'}
+                        </div>
+                        <div style="display: flex; gap: 3px;">
+                            ${!alert.acknowledged ? `
+                                <button onclick="acknowledgeRecentAlert('${alert.id}')" 
+                                        style="background: #28a745; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                        title="Acknowledge Alert">
+                                    OK
+                                </button>
+                            ` : ''}
+                            <button onclick="window.open('https://www.battlemetrics.com/players/${alert.playerId}', '_blank')" 
+                                    style="background: #17a2b8; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View Profile">
+                                Profile
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+
+            alertsDiv.innerHTML = alertsHTML;
+        }
+
+        reorderSectionsIfNeeded() {
+            const unacknowledged = Object.values(this.recentAlerts).filter(alert => !alert.acknowledged);
+            const hasUnacknowledgedAlerts = unacknowledged.length > 0;
+            
+            const recentAlertsSection = document.getElementById('recent-alerts-section');
+            const populationStats = document.getElementById('population-stats');
+            const playerSearchSection = populationStats ? populationStats.nextElementSibling : null;
+            
+            if (!recentAlertsSection) return;
+            
+            // Check if Recent Alerts is currently at the top (right after population stats)
+            const currentlyAtTop = playerSearchSection && recentAlertsSection.nextElementSibling === playerSearchSection;
+            
+            if (hasUnacknowledgedAlerts && !currentlyAtTop) {
+                // Move Recent Alerts to top (after population stats, before player search)
+                if (populationStats && playerSearchSection) {
+                    populationStats.insertAdjacentElement('afterend', recentAlertsSection);
+                }
+                
+                // Make it more prominent with pulsing effect
+                recentAlertsSection.style.border = '2px solid #dc3545';
+                recentAlertsSection.style.boxShadow = '0 0 15px rgba(220, 53, 69, 0.5)';
+                recentAlertsSection.style.animation = 'pulse 2s infinite';
+                
+                // Add pulse animation if not exists
+                if (!document.getElementById('alert-pulse-animation')) {
+                    const style = document.createElement('style');
+                    style.id = 'alert-pulse-animation';
+                    style.textContent = `
+                        @keyframes pulse {
+                            0% { box-shadow: 0 0 15px rgba(220, 53, 69, 0.5); }
+                            50% { box-shadow: 0 0 25px rgba(220, 53, 69, 0.8); }
+                            100% { box-shadow: 0 0 15px rgba(220, 53, 69, 0.5); }
+                        }
+                    `;
+                    document.head.appendChild(style);
+                }
+                
+                // Auto-expand if collapsed
+                const alertsList = document.getElementById('recent-alerts-list');
+                const toggle = document.getElementById('recentalerts-toggle');
+                if (alertsList && toggle && alertsList.style.display === 'none') {
+                    alertsList.style.display = 'block';
+                    toggle.textContent = '▼';
+                }
+                
+                console.log('Moved Recent Alerts to top due to unacknowledged alerts');
+                
+            } else if (!hasUnacknowledgedAlerts && currentlyAtTop) {
+                // Move Recent Alerts back to original position (after Player Database)
+                const playerDatabaseSection = document.getElementById('player-database-section');
+                if (playerDatabaseSection) {
+                    playerDatabaseSection.insertAdjacentElement('afterend', recentAlertsSection);
+                }
+                
+                // Remove prominence styling
+                recentAlertsSection.style.border = '1px solid #dc3545';
+                recentAlertsSection.style.boxShadow = 'none';
+                recentAlertsSection.style.animation = 'none';
+                
+                console.log('Moved Recent Alerts back to original position');
+            }
+        }
+
+        searchPlayers(query) {
+            if (!query || query.length < 2) return [];
+            
+            const lowerQuery = query.toLowerCase();
+            const results = [];
+            
+            // Use for...of for better performance than forEach
+            for (const [playerId, player] of this.currentPlayers) {
+                if (player.name.toLowerCase().includes(lowerQuery) || 
+                    playerId.includes(query)) {
+                    results.push(player);
+                }
+            }
+            
+            return results;
+        }
+
+        exportActivityLog() {
+            const csv = ['Timestamp,Player Name,Player ID,Action,Server Name'];
+            this.activityLog.forEach(entry => {
+                csv.push(`"${entry.time}","${entry.playerName}","${entry.playerId}","${entry.action}","${entry.serverName}"`);
+            });
+            
+            const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `server_activity_${new Date().toISOString().split('T')[0]}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        clearActivityLog() {
+            this.activityLog = [];
+            this.saveActivityLog();
+            this.updateActivityDisplay();
+        }
+
+        exportCurrentServerData() {
+            const data = {
+                serverID: currentServerID,
+                serverName: currentServerName,
+                alerts: this.alerts,
+                activityLog: this.activityLog,
+                savedPlayers: this.savedPlayers,
+                recentAlerts: this.recentAlerts,
+                playerDatabase: this.playerDatabase,
+                populationHistory: this.populationHistory,
+                settings: this.settings,
+                exportDate: new Date().toISOString()
+            };
+
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `battlemetrics_server_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        exportAllData() {
+            const allData = {};
+            
+            // Get all server data from localStorage
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key.startsWith('bms_')) {
+                    try {
+                        allData[key] = JSON.parse(localStorage.getItem(key));
+                    } catch (e) {
+                        allData[key] = localStorage.getItem(key);
+                    }
+                }
+            }
+
+            const exportData = {
+                exportDate: new Date().toISOString(),
+                version: '1.0.1',
+                allServerData: allData
+            };
+
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `battlemetrics_all_servers_${new Date().toISOString().split('T')[0]}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        resetCurrentServerData() {
+            // Clear all data for current server
+            localStorage.removeItem(ALERTS_KEY);
+            localStorage.removeItem(ACTIVITY_LOG_KEY);
+            localStorage.removeItem(ALERT_SETTINGS_KEY);
+            localStorage.removeItem(SAVED_PLAYERS_KEY);
+            localStorage.removeItem(RECENT_ALERTS_KEY);
+            localStorage.removeItem(PLAYER_DATABASE_KEY);
+            localStorage.removeItem(POPULATION_HISTORY_KEY);
+            localStorage.removeItem(LAST_PLAYER_STATE_KEY);
+
+            // Reset in-memory data
+            this.alerts = {};
+            this.activityLog = [];
+            this.savedPlayers = {};
+            this.recentAlerts = {};
+            this.playerDatabase = {};
+            this.populationHistory = [];
+            this.lastPlayerState = new Map();
+            this.settings = {};
+
+            // Update displays
+            this.updateAllDisplays();
+            
+            alert('Current server data has been reset.');
+        }
+
+        resetAllData() {
+            // Clear all BattleMetrics Server Monitor data
+            const keysToRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key.startsWith('bms_')) {
+                    keysToRemove.push(key);
+                }
+            }
+
+            keysToRemove.forEach(key => localStorage.removeItem(key));
+
+            // Reset current instance
+            this.resetCurrentServerData();
+            
+            alert('All server data has been reset.');
+        }
+    }
+
+    // Add global click handler for better Firefox compatibility
+    document.addEventListener('click', (event) => {
+        const target = event.target;
+        console.log('[Click Handler] Button clicked:', target.textContent, target.onclick ? 'has onclick' : 'no onclick');
+        
+        // Handle alert buttons
+        if (target.onclick && target.onclick.toString().includes('togglePlayerAlert')) {
+            console.log('[Click Handler] Alert button detected');
+            event.preventDefault();
+            
+            // Extract parameters from onclick attribute
+            const onclickStr = target.onclick.toString();
+            console.log('[Click Handler] onclick string:', onclickStr);
+            const match = onclickStr.match(/togglePlayerAlert\('([^']+)',\s*'([^']+)'\)/);
+            
+            if (match) {
+                const playerName = match[1];
+                const playerId = match[2];
+                console.log('[Click Handler] Extracted params:', playerName, playerId);
+                window.togglePlayerAlert(playerName, playerId);
+            } else {
+                console.log('[Click Handler] Failed to extract parameters from onclick');
+            }
+        }
+    });
+
+    // Create Toggle Button
+    const createToggleButton = () => {
+        const existingToggleBtn = document.getElementById(TOGGLE_BUTTON_ID);
+        if (existingToggleBtn) existingToggleBtn.remove();
+
+        const toggleBtn = document.createElement("button");
+        toggleBtn.id = TOGGLE_BUTTON_ID;
+        toggleBtn.onclick = () => {
+            const currentlyVisible = isMenuVisible();
+            setMenuVisibility(!currentlyVisible);
+        };
+
+        Object.assign(toggleBtn.style, {
+            position: "fixed",
+            top: "20px",
+            right: "20px",
+            zIndex: "10000",
+            padding: "8px 12px",
+            backgroundColor: "#6c757d",
+            color: "#fff",
+            border: "none",
+            borderRadius: "5px",
+            cursor: "pointer",
+            fontSize: "14px",
+            fontWeight: "bold"
+        });
+
+        document.body.appendChild(toggleBtn);
+        updateToggleButton();
+    };
+
+    // Create Server Monitor UI
+    const createServerMonitor = () => {
+        const existingMonitor = document.getElementById(SERVER_MONITOR_ID);
+        if (existingMonitor) existingMonitor.remove();
+
+        const monitor = document.createElement('div');
+        monitor.id = SERVER_MONITOR_ID;
+        
+        Object.assign(monitor.style, {
+            position: "fixed",
+            top: "70px",
+            right: "20px",
+            backgroundColor: "#2c3e50",
+            color: "#fff",
+            padding: "20px",
+            borderRadius: "10px",
+            zIndex: "9999",
+            fontSize: "14px",
+            maxWidth: "450px",
+            maxHeight: "80vh",
+            overflowY: "auto",
+            boxShadow: "0 8px 25px rgba(0,0,0,0.3)",
+            border: "1px solid #34495e",
+            lineHeight: "1.4"
+        });
+
+        monitor.innerHTML = `
+            <div style="border-bottom: 2px solid rgba(255,255,255,0.2); padding-bottom: 12px; margin-bottom: 15px;">
+                <div style="font-size: 18px; font-weight: bold; color: #fff; margin-bottom: 8px;">
+                    Server Monitor
+                </div>
+                <div style="font-size: 12px; opacity: 0.9;">
+                    Real-time player tracking & alerts
+                </div>
+                <div style="font-size: 11px; opacity: 0.7; margin-top: 4px; color: #17a2b8;">
+                    Server ID: <span id="current-server-id">${currentServerID || 'Loading...'}</span>
+                </div>
+                <div style="font-size: 11px; opacity: 0.7; margin-top: 2px; color: #28a745;">
+                    Server: <span id="current-server-name">${currentServerName || 'Loading...'}</span>
+                </div>
+            </div>
+
+            <!-- Population Stats -->
+            <div id="population-stats">
+                <!-- Population stats will be populated by updatePopulationDisplay() -->
+            </div>
+
+            <!-- Player Search -->
+            <div style="background: rgba(0, 123, 255, 0.2); border: 1px solid #007bff; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #007bff; margin-bottom: 8px;">
+                    Player Search
+                </div>
+                <div style="display: flex; gap: 5px; align-items: center;">
+                    <input type="text" id="player-search" placeholder="Search current players..." 
+                           style="flex: 1; padding: 5px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 12px;"
+                           oninput="handlePlayerSearch(this.value)"
+                           onblur="setTimeout(() => { if (!this.value) { activePlayerSearch = ''; } }, 200)">
+                    <button onclick="clearPlayerSearch()" 
+                            style="background: #6c757d; color: white; border: none; padding: 5px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                            title="Clear Search">
+                        ✕
+                    </button>
+                </div>
+                <div id="search-results" style="margin-top: 8px; max-height: 150px; overflow-y: auto;"></div>
+            </div>
+
+            <!-- Current Online Players -->
+            <div style="background: rgba(40, 167, 69, 0.2); border: 1px solid #28a745; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #28a745; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('current-players')">
+                    Current Online Players (<span id="player-count">0</span>) <span id="players-toggle">▼</span>
+                </div>
+                <div id="current-players-list" style="max-height: 200px; overflow-y: auto;">
+                    Loading players...
+                </div>
+            </div>
+
+            <!-- Alert Players -->
+            <div style="background: rgba(255, 193, 7, 0.2); border: 1px solid #ffc107; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #ffc107; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('alert-players')">
+                    Alert Players (<span id="alert-count">0</span>) <span id="alertplayers-toggle">▼</span>
+                </div>
+                <div id="alert-players-list" style="max-height: 200px; overflow-y: auto;">
+                    No players with alerts
+                </div>
+            </div>
+
+            <!-- Saved Players -->
+            <div style="background: rgba(108, 117, 125, 0.2); border: 1px solid #6c757d; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #6c757d; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('saved-players')">
+                    Saved Players (<span id="saved-count">0</span>) <span id="savedplayers-toggle">▼</span>
+                </div>
+                <div id="saved-players-list" style="max-height: 200px; overflow-y: auto;">
+                    No saved players
+                </div>
+            </div>
+
+            <!-- Player Database -->
+            <div id="player-database-section" style="background: rgba(111, 66, 193, 0.2); border: 1px solid #6f42c1; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #6f42c1; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('player-database')">
+                    Player Database (<span id="database-count">0</span>) <span id="playerdatabase-toggle">▶</span>
+                </div>
+                <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center;">
+                    <input type="text" id="database-search" placeholder="Search database by name or ID..." 
+                           style="flex: 1; padding: 5px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 12px;"
+                           oninput="handleDatabaseSearch(this.value)"
+                           onblur="setTimeout(() => { if (!this.value) { activeDatabaseSearch = ''; if (serverMonitor) serverMonitor.updateDatabaseDisplay(); } }, 200)">
+                    <button onclick="clearDatabaseSearch()" 
+                            style="background: #6c757d; color: white; border: none; padding: 5px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                            title="Clear Search">
+                        ✕
+                    </button>
+                </div>
+                <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center;">
+                    <select id="database-filter" onchange="filterDatabase(this.value)" 
+                            style="padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
+                        <option value="all">All Players</option>
+                        <option value="online">Online Only</option>
+                        <option value="offline">Offline Only</option>
+                        <option value="recent-left">Recently Left (Last Hour)</option>
+                        <option value="name-changed">Name Changed</option>
+                    </select>
+                    <button onclick="clearDatabaseFilter()" 
+                            style="background: #6c757d; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                            title="Clear Filter">
+                        Clear
+                    </button>
+                </div>
+                <div id="player-database-list" style="max-height: 250px; overflow-y: auto; display: none;">
+                    No players in database
+                </div>
+            </div>
+
+            <!-- Recent Alerts -->
+            <div id="recent-alerts-section" style="background: rgba(220, 53, 69, 0.2); border: 1px solid #dc3545; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #dc3545; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('recent-alerts')">
+                    Recent Alerts (<span id="recent-alerts-count">0</span>) <span id="recentalerts-toggle">▼</span>
+                </div>
+                <div id="recent-alerts-list" style="max-height: 200px; overflow-y: auto;">
+                    No recent alerts
+                </div>
+            </div>
+
+            <!-- Recent Activity -->
+            <div style="background: rgba(23, 162, 184, 0.2); border: 1px solid #17a2b8; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #17a2b8; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('recent-activity')">
+                    All Activity (<span id="activity-count">0</span>) <span id="activity-toggle">▶</span>
+                </div>
+                <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center; display: none;" id="activity-filters">
+                    <select id="activity-filter" onchange="filterActivity(this.value)" 
+                            style="padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
+                        <option value="all">All Activity</option>
+                        <option value="joined">Joined Only</option>
+                        <option value="left">Left Only</option>
+                        <option value="recent">Most Recent (Last Hour)</option>
+                    </select>
+                    <button onclick="clearActivityFilter()" 
+                            style="background: #6c757d; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                            title="Clear Filter">
+                        Clear
+                    </button>
+                </div>
+                <div id="recent-activity-list" style="max-height: 300px; overflow-y: auto; display: none;">
+                    No recent activity
+                </div>
+            </div>
+
+            <!-- Settings -->
+            <div style="background: rgba(220, 53, 69, 0.2); border: 1px solid #dc3545; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
+                <div style="font-size: 14px; font-weight: bold; color: #dc3545; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('alert-settings')">
+                    Settings <span id="alerts-toggle">▶</span>
+                </div>
+                <div id="alert-settings-content" style="display: none;">
+                    <div style="margin-bottom: 10px;">
+                        <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
+                            <input type="checkbox" id="sound-alerts" ${serverMonitor?.soundEnabled ? 'checked' : ''} 
+                                   onchange="toggleSoundAlerts(this.checked)" style="margin-right: 8px;">
+                            Enable sound alerts
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
+                            <input type="checkbox" id="repeat-alerts" ${serverMonitor?.settings.repeatAlerts !== false ? 'checked' : ''} 
+                                   onchange="toggleRepeatAlerts(this.checked)" style="margin-right: 8px;">
+                            Repeat alert sounds (every 1 min)
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
+                            <input type="checkbox" id="debug-mode" 
+                                   onchange="toggleDebugMode(this.checked)" style="margin-right: 8px;">
+                            Enable debug console mode
+                        </label>
+                        <button onclick="testSound()" 
+                                style="background: #28a745; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-top: 5px;">
+                            Test Sound
+                        </button>
+                    </div>
+                    <div style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px;">
+                        <button onclick="exportCurrentServer()" 
+                                style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Export Current
+                        </button>
+                        <button onclick="exportAllServers()" 
+                                style="background: #007bff; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Export All Data
+                        </button>
+                        <button onclick="clearLog()" 
+                                style="background: #ffc107; color: black; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Clear Log
+                        </button>
+                        <button onclick="toggleMonitoring()" id="monitoring-btn"
+                                style="background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Stop Monitoring
+                        </button>
+                    </div>
+                    <div style="display: flex; gap: 5px; flex-wrap: wrap;">
+                        <button onclick="resetCurrentServer()" 
+                                style="background: #fd7e14; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Reset Current Server
+                        </button>
+                        <button onclick="resetAllData()" 
+                                style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Reset All Servers
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Debug Console -->
+            <div id="debug-console-section" style="background: rgba(108, 117, 125, 0.2); border: 1px solid #6c757d; border-radius: 5px; padding: 12px; margin-bottom: 15px; display: none;">
+                <div style="font-size: 14px; font-weight: bold; color: #6c757d; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('debug-console')">
+                    Debug Console <span id="debugconsole-toggle">▼</span>
+                </div>
+                <div id="debug-console-content" style="display: block;">
+                    <div style="margin-bottom: 10px; font-size: 11px; color: #6c757d;">
+                        <div id="debug-stats">Loading debug stats...</div>
+                    </div>
+                    <div style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px;">
+                        <button onclick="testDebugConsole()" 
+                                style="background: #6f42c1; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Test Console
+                        </button>
+
+                        <button onclick="copyDebugLogs()" 
+                                style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Copy Text
+                        </button>
+                        <button onclick="exportDebugLogs()" 
+                                style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Export JSON
+                        </button>
+                        <button onclick="clearDebugLogs()" 
+                                style="background: #ffc107; color: black; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Clear Logs
+                        </button>
+                    </div>
+                    <div id="debug-console-list" style="max-height: 300px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 3px; padding: 8px; font-family: monospace;">
+                        No debug logs
+                    </div>
+                </div>
+            </div>
+
+            <!-- Version Info -->
+            <div style="text-align: center; padding: 10px; border-top: 1px solid rgba(255,255,255,0.2); margin-top: 10px;">
+                <div style="font-size: 11px; color: #6c757d; opacity: 0.8;">
+                    BattleMetrics Server Monitor v1.0.1
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(monitor);
+        updateUIVisibility();
+        
+        // Initialize debug console display
+        setTimeout(() => {
+            console.log('[Debug Console] Initializing debug console display...');
+            const debugSection = document.getElementById('debug-console-section');
+            const debugCheckbox = document.getElementById('debug-mode');
+            
+            if (debugConsole) {
+                console.log('[Debug Console] Debug console enabled:', debugConsole.enabled);
+                console.log('[Debug Console] Debug logs count:', debugConsole.logs.length);
+                
+                if (debugSection) {
+                    debugSection.style.display = debugConsole.enabled ? 'block' : 'none';
+                }
+                
+                if (debugCheckbox) {
+                    debugCheckbox.checked = debugConsole.enabled;
+                }
+                
+                // Always try to refresh display
+                debugConsole.updateDebugDisplay();
+            }
+        }, 500);
+    };
+
+    // Global functions for UI interaction
+    window.toggleSection = (sectionId) => {
+        const content = document.getElementById(`${sectionId}-list`) || document.getElementById(`${sectionId}-content`);
+        let toggle;
+        
+        // Handle different toggle ID patterns
+        if (sectionId === 'recent-activity') {
+            toggle = document.getElementById('activity-toggle');
+        } else if (sectionId === 'player-database') {
+            toggle = document.getElementById('playerdatabase-toggle');
+        } else if (sectionId === 'current-players') {
+            toggle = document.getElementById('players-toggle');
+        } else if (sectionId === 'alert-settings') {
+            toggle = document.getElementById('alerts-toggle');
+        } else {
+            toggle = document.getElementById(`${sectionId.replace('-', '')}-toggle`);
+        }
+        
+        if (content && toggle) {
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                toggle.textContent = '▼';
+                
+                // Show filters when section is expanded
+                if (sectionId === 'recent-activity') {
+                    const filters = document.getElementById('activity-filters');
+                    if (filters) filters.style.display = 'flex';
+                }
+                
+                // Refresh debug stats when debug console is opened
+                if (sectionId === 'debug-console') {
+                    setTimeout(() => refreshDebugStats(), 100);
+                }
+            } else {
+                content.style.display = 'none';
+                toggle.textContent = '▶';
+                
+                // Hide filters when section is collapsed
+                if (sectionId === 'recent-activity') {
+                    const filters = document.getElementById('activity-filters');
+                    if (filters) filters.style.display = 'none';
+                }
+            }
+        }
+    };
+
+    // Debounce timer for search
+    let searchDebounceTimer = null;
+    let lastSearchQuery = '';
+    
+    // Optimized search function with debouncing and caching
+    const performPlayerSearch = (query) => {
+        const resultsDiv = document.getElementById('search-results');
+        if (!resultsDiv || !serverMonitor) return;
+
+        // Check cache first
+        if (cachedSearchResults.has(query)) {
+            const cachedResults = cachedSearchResults.get(query);
+            renderSearchResults(cachedResults, resultsDiv);
+            return;
+        }
+
+        // Search both current players and database
+        const currentResults = serverMonitor.searchPlayers(query);
+        const databaseResults = serverMonitor.searchDatabase(query);
+        
+        // Combine results efficiently
+        const allResults = [];
+        const seenIds = new Set();
+        
+        // Add current players first (they're online)
+        for (const player of currentResults) {
+            allResults.push({
+                ...player,
+                isOnline: true,
+                source: 'current'
+            });
+            seenIds.add(player.id);
+        }
+        
+        // Add database players that aren't already in current players
+        for (const player of databaseResults) {
+            if (!seenIds.has(player.id)) {
+                allResults.push({
+                    ...player,
+                    name: player.currentName,
+                    isOnline: false,
+                    source: 'database'
+                });
+                seenIds.add(player.id);
+            }
+        }
+        
+        // Sort by online status first, then by name
+        allResults.sort((a, b) => {
+            if (a.isOnline && !b.isOnline) return -1;
+            if (!a.isOnline && b.isOnline) return 1;
+            return a.name.localeCompare(b.name);
+        });
+
+        // Cache results for this query
+        cachedSearchResults.set(query, allResults);
+        
+        // Limit cache size to prevent memory issues
+        if (cachedSearchResults.size > 50) {
+            const firstKey = cachedSearchResults.keys().next().value;
+            cachedSearchResults.delete(firstKey);
+        }
+
+        renderSearchResults(allResults, resultsDiv);
+    };
+
+    // Separate function to render results (reduces code duplication)
+    const renderSearchResults = (allResults, resultsDiv) => {
+        if (allResults.length === 0) {
+            resultsDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic; font-size: 11px;">No players found</div>';
+            return;
+        }
+
+        // Use DocumentFragment for better performance
+        const fragment = document.createDocumentFragment();
+        
+        allResults.forEach(player => {
+            const isAlerted = serverMonitor.alerts[player.id];
+            const isSaved = serverMonitor.savedPlayers[player.id];
+            
+            const playerDiv = document.createElement('div');
+            playerDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 11px;';
+            
+            const playerInfo = document.createElement('div');
+            playerInfo.style.cssText = 'flex: 1; overflow: hidden;';
+            
+            const statusColor = player.isOnline ? '#28a745' : '#6c757d';
+            const statusText = player.isOnline ? 'ONLINE' : 'OFFLINE';
+            
+            playerInfo.innerHTML = `
+                <div style="color: white; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                    ${player.name}
+                </div>
+                <div style="color: ${statusColor}; font-size: 9px; margin-top: 1px;">
+                    ${statusText} • ID: ${player.id}
+                </div>
+            `;
+            
+            const buttonsDiv = document.createElement('div');
+            buttonsDiv.style.cssText = 'display: flex; gap: 3px; margin-left: 5px;';
+            
+            // Profile button
+            const profileBtn = document.createElement('button');
+            profileBtn.textContent = 'Profile';
+            profileBtn.title = 'View Profile';
+            profileBtn.style.cssText = 'background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;';
+            profileBtn.onclick = () => window.open(`https://www.battlemetrics.com/players/${player.id}`, '_blank');
+            
+            // Alert button
+            const alertBtn = document.createElement('button');
+            alertBtn.textContent = isAlerted ? 'Remove' : 'Add Alert';
+            alertBtn.title = isAlerted ? 'Remove Alert' : 'Add Alert';
+            alertBtn.style.cssText = `background: ${isAlerted ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;`;
+            alertBtn.onclick = () => togglePlayerAlert(player.name, player.id);
+            
+            // Save button
+            const saveBtn = document.createElement('button');
+            saveBtn.textContent = isSaved ? 'Saved' : 'Save';
+            saveBtn.title = isSaved ? 'Already Saved' : 'Save Player';
+            saveBtn.style.cssText = `background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 2px; cursor: pointer; font-size: 9px;`;
+            saveBtn.disabled = isSaved;
+            saveBtn.onclick = () => {
+                if (!isSaved) {
+                    savePlayer(player.name, player.id);
+                }
+            };
+            
+            buttonsDiv.appendChild(profileBtn);
+            buttonsDiv.appendChild(alertBtn);
+            buttonsDiv.appendChild(saveBtn);
+            
+            playerDiv.appendChild(playerInfo);
+            playerDiv.appendChild(buttonsDiv);
+            fragment.appendChild(playerDiv);
+        });
+        
+        // Clear and append all at once for better performance
+        resultsDiv.innerHTML = '';
+        resultsDiv.appendChild(fragment);
+    };
+
+    window.handlePlayerSearch = (query) => {
+        // Track active search state
+        activePlayerSearch = query;
+
+        // Clear previous timer
+        if (searchDebounceTimer) {
+            clearTimeout(searchDebounceTimer);
+        }
+
+        if (query.length < 2) {
+            activePlayerSearch = '';
+            const resultsDiv = document.getElementById('search-results');
+            if (resultsDiv) {
+                resultsDiv.innerHTML = '';
+            }
+            // Clear cache when search is cleared
+            cachedSearchResults.clear();
+            return;
+        }
+
+        // Debounce search to reduce lag
+        searchDebounceTimer = setTimeout(() => {
+            if (activePlayerSearch === query) { // Only search if query hasn't changed
+                performPlayerSearch(query);
+            }
+        }, 150); // 150ms debounce delay
+    };
+
+    // Debounce mechanism to prevent double-clicks
+    let alertToggleTimeout = null;
+    
+    window.togglePlayerAlert = (playerName, playerId) => {
+        // Prevent rapid double-clicks
+        if (alertToggleTimeout) {
+            console.log('[Alert System] Ignoring rapid click');
+            return;
+        }
+        
+        alertToggleTimeout = setTimeout(() => {
+            alertToggleTimeout = null;
+        }, 500);
+        
+        debugConsole.debug('togglePlayerAlert called', { playerName, playerId });
+        
+        if (!serverMonitor) {
+            debugConsole.error('ServerMonitor not initialized');
+            alert('Server Monitor not initialized. Please refresh the page.');
+            return;
+        }
+        
+        debugConsole.debug('Current alerts', serverMonitor.alerts);
+        
+        const isAlerted = serverMonitor.alerts[playerId];
+        debugConsole.debug('Player is currently alerted: ' + isAlerted);
+        
+        try {
+            if (isAlerted) {
+                debugConsole.info('Removing alert for player: ' + playerName);
+                serverMonitor.removeAlert(playerId);
+            } else {
+                debugConsole.info('Adding alert for player: ' + playerName);
+                serverMonitor.addAlert(playerName, playerId, 'both');
+            }
+            
+            debugConsole.debug('Alert operation completed', serverMonitor.alerts);
+            
+            // Immediately update displays (the addAlert/removeAlert methods already call updateAlertDisplay)
+            serverMonitor.updatePlayerDisplay();
+            serverMonitor.updateSavedPlayersDisplay();
+            
+            // Clear search cache to ensure fresh results
+            if (typeof cachedSearchResults !== 'undefined') {
+                cachedSearchResults.clear();
+            }
+            
+            // Refresh search results to update button states
+            const searchInput = document.getElementById('player-search');
+            if (searchInput && searchInput.value.length >= 2) {
+                handlePlayerSearch(searchInput.value);
+            }
+            
+            // Also update with debouncing as backup
+            clearTimeout(serverMonitor.alertUpdateTimeout);
+            serverMonitor.alertUpdateTimeout = setTimeout(() => {
+                serverMonitor.updateAlertDisplay();
+            }, 300);
+            
+            clearTimeout(serverMonitor.savedUpdateTimeout);
+            serverMonitor.savedUpdateTimeout = setTimeout(() => {
+                serverMonitor.updateSavedPlayersDisplay();
+            }, 300);
+            
+        } catch (error) {
+            debugConsole.error('Error in togglePlayerAlert', error);
+            alert('Error toggling alert: ' + error.message);
+        }
+    };
+
+    window.acknowledgeRecentAlert = (alertId) => {
+        if (serverMonitor) {
+            serverMonitor.acknowledgeAlert(alertId);
+        }
+    };
+
+    // Add debounce timer for database search
+    let databaseSearchDebounceTimer = null;
+
+    window.handleDatabaseSearch = (query) => {
+        if (!serverMonitor) return;
+        
+        const databaseDiv = document.getElementById('player-database-list');
+        if (!databaseDiv) return;
+
+        // Track active database search state
+        activeDatabaseSearch = query;
+
+        // Clear previous timer
+        if (databaseSearchDebounceTimer) {
+            clearTimeout(databaseSearchDebounceTimer);
+        }
+
+        // Show the database list when user starts searching
+        if (query.length >= 2 && databaseDiv.style.display === 'none') {
+            databaseDiv.style.display = 'block';
+            const toggle = document.getElementById('playerdatabase-toggle');
+            if (toggle) toggle.textContent = '▼';
+        }
+
+        if (query.length < 2) {
+            activeDatabaseSearch = '';
+            databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">Type 2+ characters to search</div>';
+            return;
+        }
+
+        // Show loading indicator for large databases
+        const playerCount = Object.keys(serverMonitor.playerDatabase).length;
+        if (playerCount > 1000) {
+            databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">Searching...</div>';
+        }
+
+        // Debounce database search to prevent lag with large datasets
+        databaseSearchDebounceTimer = setTimeout(() => {
+            if (activeDatabaseSearch === query) { // Only search if query hasn't changed
+                performDatabaseSearch(query, databaseDiv);
+            }
+        }, 200); // 200ms debounce delay for database search
+    };
+
+    // Separate function to perform the actual database search
+    window.performDatabaseSearch = (query, databaseDiv) => {
+        // Check cache first
+        if (databaseSearchCache.has(query)) {
+            const cachedResults = databaseSearchCache.get(query);
+            currentDatabaseResults = cachedResults;
+            currentDatabasePage = 0;
+            
+            if (cachedResults.length === 0) {
+                databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players found</div>';
+                return;
+            }
+            serverMonitor.renderDatabasePlayers(cachedResults, databaseDiv, 0);
+            return;
+        }
+
+        const results = serverMonitor.searchDatabase(query);
+        const sortedResults = results.sort((a, b) => b.lastSeen - a.lastSeen);
+        
+        // Store results for pagination
+        currentDatabaseResults = sortedResults;
+        currentDatabasePage = 0;
+        
+        // Cache the results
+        databaseSearchCache.set(query, sortedResults);
+        
+        // Limit cache size to prevent memory issues
+        if (databaseSearchCache.size > 30) {
+            const firstKey = databaseSearchCache.keys().next().value;
+            databaseSearchCache.delete(firstKey);
+        }
+        
+        if (sortedResults.length === 0) {
+            databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players found</div>';
+            return;
+        }
+
+        serverMonitor.renderDatabasePlayers(sortedResults, databaseDiv, 0);
+    };
+
+    window.clearPlayerSearch = () => {
+        const searchInput = document.getElementById('player-search');
+        const resultsDiv = document.getElementById('search-results');
+        if (searchInput) {
+            searchInput.value = '';
+            activePlayerSearch = '';
+        }
+        if (resultsDiv) {
+            resultsDiv.innerHTML = '';
+        }
+    };
+
+    // Global variable to store current database search results for pagination
+    let currentDatabaseResults = [];
+    let currentDatabasePage = 0;
+
+    window.renderDatabasePage = (page) => {
+        if (!serverMonitor || currentDatabaseResults.length === 0) return;
+        
+        currentDatabasePage = Math.max(0, Math.min(page, Math.ceil(currentDatabaseResults.length / 20) - 1));
+        const databaseDiv = document.getElementById('player-database-list');
+        if (databaseDiv) {
+            serverMonitor.renderDatabasePlayers(currentDatabaseResults, databaseDiv, currentDatabasePage);
+        }
+    };
+
+    window.clearDatabaseSearch = () => {
+        const searchInput = document.getElementById('database-search');
+        if (searchInput) {
+            searchInput.value = '';
+            activeDatabaseSearch = '';
+            currentDatabaseResults = [];
+            currentDatabasePage = 0;
+            databaseSearchCache.clear(); // Clear cache when search is cleared
+        }
+    };
+
+    // Debug function to help troubleshoot missing players
+    window.debugFindPlayer = (playerName) => {
+        if (!serverMonitor) {
+            console.log('❌ ServerMonitor not initialized');
+            return;
+        }
+        return serverMonitor.debugFindPlayer(playerName);
+    };
+
+    // Function to get database stats
+    window.getDatabaseStats = () => {
+        if (!serverMonitor) {
+            console.log('❌ ServerMonitor not initialized');
+            return;
+        }
+        
+        const totalPlayers = Object.keys(serverMonitor.playerDatabase).length;
+        const playersWithPreviousNames = Object.values(serverMonitor.playerDatabase)
+            .filter(p => p.previousNames && p.previousNames.length > 0).length;
+        const playersWithNameChanges = Object.values(serverMonitor.playerDatabase)
+            .filter(p => p.nameChanged).length;
+        
+        console.log(`📊 Database Stats:`);
+        console.log(`   Total players: ${totalPlayers}`);
+        console.log(`   Players with previous names: ${playersWithPreviousNames}`);
+        console.log(`   Players with name changes: ${playersWithNameChanges}`);
+        
+        return {
+            totalPlayers,
+            playersWithPreviousNames,
+            playersWithNameChanges
+        };
+    };
+
+    window.clearDatabaseFilter = () => {
+        const filterSelect = document.getElementById('database-filter');
+        if (filterSelect) {
+            filterSelect.value = 'all';
+        }
+        if (serverMonitor) {
+            serverMonitor.updateDatabaseDisplay();
+        }
+    };
+
+    window.filterDatabase = (filterType) => {
+        if (serverMonitor) {
+            serverMonitor.updateDatabaseDisplay(filterType);
+        }
+    };
+
+    window.toggleSoundAlerts = (enabled) => {
+        if (serverMonitor) {
+            serverMonitor.soundEnabled = enabled;
+            serverMonitor.settings.soundEnabled = enabled;
+            serverMonitor.saveSettings();
+        }
+    };
+
+    window.toggleRepeatAlerts = (enabled) => {
+        if (serverMonitor) {
+            serverMonitor.settings.repeatAlerts = enabled;
+            serverMonitor.saveSettings();
+            
+            if (!enabled) {
+                serverMonitor.stopAlertReminders();
+            } else {
+                // Check if there are unacknowledged alerts to start reminders
+                const unacknowledged = Object.values(serverMonitor.recentAlerts).filter(alert => !alert.acknowledged);
+                if (unacknowledged.length > 0) {
+                    serverMonitor.startAlertReminders();
+                }
+            }
+        }
+    };
+
+    window.toggleMonitoring = () => {
+        const btn = document.getElementById('monitoring-btn');
+        if (!serverMonitor || !btn) return;
+
+        if (serverMonitor.isMonitoring) {
+            serverMonitor.stopMonitoring();
+            btn.textContent = 'Start Monitoring';
+            btn.style.background = '#28a745';
+        } else {
+            serverMonitor.startMonitoring();
+            btn.textContent = 'Stop Monitoring';
+            btn.style.background = '#dc3545';
+        }
+    };
+
+    window.exportLog = () => {
+        if (serverMonitor) {
+            serverMonitor.exportActivityLog();
+        }
+    };
+
+    window.clearLog = () => {
+        if (serverMonitor) {
+            serverMonitor.activityLog = [];
+            serverMonitor.saveActivityLog();
+            serverMonitor.updateActivityDisplay();
+        }
+    };
+
+    window.testSound = () => {
+        if (serverMonitor) {
+            serverMonitor.playAlertSound();
+        }
+    };
+
+    window.exportCurrentServer = () => {
+        if (serverMonitor) {
+            serverMonitor.exportCurrentServerData();
+        }
+    };
+
+    window.exportAllServers = () => {
+        if (serverMonitor) {
+            serverMonitor.exportAllData();
+        }
+    };
+
+    window.resetCurrentServer = () => {
+        if (confirm('Are you sure you want to reset all data for this server? This cannot be undone.')) {
+            if (serverMonitor) {
+                serverMonitor.resetCurrentServerData();
+            }
+        }
+    };
+
+    window.resetAllData = () => {
+        if (confirm('Are you sure you want to reset ALL data for ALL servers? This cannot be undone.')) {
+            if (serverMonitor) {
+                serverMonitor.resetAllData();
+            }
+        }
+    };
+
+    window.savePlayer = (playerName, playerId) => {
+        if (serverMonitor) {
+            serverMonitor.savePlayer(playerName, playerId);
+            serverMonitor.updateSavedPlayersDisplay();
+            
+            // Clear search cache to ensure fresh results
+            if (typeof cachedSearchResults !== 'undefined') {
+                cachedSearchResults.clear();
+            }
+            
+            // Refresh search results to update button states
+            const searchInput = document.getElementById('player-search');
+            if (searchInput && searchInput.value.length >= 2) {
+                handlePlayerSearch(searchInput.value);
+            }
+        }
+    };
+
+    window.removeSavedPlayer = (playerId) => {
+        if (serverMonitor) {
+            serverMonitor.removeSavedPlayer(playerId);
+            serverMonitor.updateSavedPlayersDisplay();
+        }
+    };
+
+    window.filterActivity = (filterType) => {
+        if (serverMonitor) {
+            serverMonitor.updateActivityDisplay(filterType);
+        }
+    };
+
+    window.clearActivityFilter = () => {
+        const filterSelect = document.getElementById('activity-filter');
+        if (filterSelect) {
+            filterSelect.value = 'all';
+        }
+        if (serverMonitor) {
+            serverMonitor.updateActivityDisplay();
+        }
+    };
+
+    window.toggleDebugMode = (enabled) => {
+        if (debugConsole) {
+            debugConsole.saveDebugSetting(enabled);
+            const debugSection = document.getElementById('debug-console-section');
+            if (debugSection) {
+                debugSection.style.display = enabled ? 'block' : 'none';
+            }
+            if (enabled) {
+                debugConsole.updateDebugDisplay();
+                refreshDebugStats();
+            }
+        }
+    };
+
+    window.testDebugConsole = () => {
+        if (debugConsole) {
+            debugConsole.info('Debug console test message');
+            debugConsole.warn('This is a test warning');
+            debugConsole.error('This is a test error');
+            debugConsole.debug('This is a test debug message');
+        }
+    };
+
+    window.copyDebugLogs = () => {
+        if (debugConsole) {
+            const logsText = debugConsole.getLogsAsText();
+            navigator.clipboard.writeText(logsText).then(() => {
+                alert('Debug logs copied to clipboard');
+            }).catch(() => {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = logsText;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                alert('Debug logs copied to clipboard');
+            });
+        }
+    };
+
+    window.exportDebugLogs = () => {
+        if (debugConsole) {
+            debugConsole.exportLogs();
+        }
+    };
+
+    window.clearDebugLogs = () => {
+        if (debugConsole) {
+            debugConsole.clearLogs();
+            refreshDebugStats();
+        }
+    };
+
+    window.refreshDebugStats = () => {
+        if (debugConsole) {
+            const stats = debugConsole.getStats();
+            const statsDiv = document.getElementById('debug-stats');
+            if (statsDiv) {
+                statsDiv.innerHTML = `
+                    Total logs: ${stats.totalLogs} | 
+                    Errors: ${stats.errorCount} | 
+                    Warnings: ${stats.warnCount} | 
+                    Info: ${stats.infoCount} | 
+                    Debug: ${stats.debugCount}
+                `;
+            }
+        }
+    };
+
+    window.clearLog = () => {
+        if (serverMonitor && confirm('Are you sure you want to clear the activity log?')) {
+            serverMonitor.clearActivityLog();
+        }
+    };
+
+    window.resetCurrentServer = () => {
+        if (confirm('Are you sure you want to reset ALL data for THIS SERVER? This will clear:\n\n• All player alerts\n• Activity log\n• Settings\n• Saved players\n• Recent alerts\n• Player database\n• Population history\n\nThis action cannot be undone!')) {
+            // Clear all server-specific localStorage data
+            localStorage.removeItem(ALERTS_KEY);
+            localStorage.removeItem(ACTIVITY_LOG_KEY);
+            localStorage.removeItem(ALERT_SETTINGS_KEY);
+            localStorage.removeItem(SAVED_PLAYERS_KEY);
+            localStorage.removeItem(RECENT_ALERTS_KEY);
+            localStorage.removeItem(PLAYER_DATABASE_KEY);
+            localStorage.removeItem(POPULATION_HISTORY_KEY);
+            localStorage.removeItem(LAST_PLAYER_STATE_KEY);
+            
+            // Reset serverMonitor if it exists
+            if (serverMonitor) {
+                serverMonitor.alerts = {};
+                serverMonitor.activityLog = [];
+                serverMonitor.settings = {};
+                serverMonitor.savedPlayers = {};
+                serverMonitor.recentAlerts = {};
+                serverMonitor.playerDatabase = {};
+                serverMonitor.populationHistory = [];
+                serverMonitor.lastPlayerState = new Map();
+                serverMonitor.soundEnabled = true;
+                
+                // Update displays
+                serverMonitor.updatePlayerDisplay();
+                serverMonitor.updateActivityDisplay();
+                serverMonitor.updateAlertDisplay();
+                serverMonitor.updateSavedPlayersDisplay();
+                serverMonitor.updateRecentAlertsDisplay();
+                serverMonitor.updateDatabaseDisplay();
+                serverMonitor.updatePopulationDisplay();
+                serverMonitor.stopAlertReminders();
+                
+                // Reset sound checkboxes
+                const soundCheckbox = document.getElementById('sound-alerts');
+                const repeatCheckbox = document.getElementById('repeat-alerts');
+                if (soundCheckbox) {
+                    soundCheckbox.checked = true;
+                }
+                if (repeatCheckbox) {
+                    repeatCheckbox.checked = true;
+                }
+            }
+            
+            alert('Current server data has been reset successfully!');
+        }
+    };
+
+    window.resetAllData = () => {
+        if (confirm('⚠️ DANGER: Reset ALL data for ALL SERVERS?\n\nThis will permanently delete:\n• All server alerts and settings\n• All activity logs\n• All saved players\n• All player databases\n• All population history\n• UI preferences\n\nThis action cannot be undone!')) {
+            // Get all localStorage keys that start with 'bms_'
+            const keysToRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.startsWith('bms_')) {
+                    keysToRemove.push(key);
+                }
+            }
+            
+            // Remove all BattleMetrics Monitor data
+            keysToRemove.forEach(key => localStorage.removeItem(key));
+            
+            // Reset current serverMonitor if it exists
+            if (serverMonitor) {
+                serverMonitor.alerts = {};
+                serverMonitor.activityLog = [];
+                serverMonitor.settings = {};
+                serverMonitor.savedPlayers = {};
+                serverMonitor.recentAlerts = {};
+                serverMonitor.playerDatabase = {};
+                serverMonitor.populationHistory = [];
+                serverMonitor.lastPlayerState = new Map();
+                serverMonitor.soundEnabled = true;
+                
+                // Update displays
+                serverMonitor.updatePlayerDisplay();
+                serverMonitor.updateActivityDisplay();
+                serverMonitor.updateAlertDisplay();
+                serverMonitor.updateSavedPlayersDisplay();
+                serverMonitor.updateRecentAlertsDisplay();
+                serverMonitor.updateDatabaseDisplay();
+                serverMonitor.updatePopulationDisplay();
+                serverMonitor.stopAlertReminders();
+            }
+            
+            alert('All data for all servers has been permanently deleted!');
+            
+            // Reload page to ensure clean state
+            setTimeout(() => location.reload(), 1000);
+        }
+    };
+
+    window.exportCurrentServer = () => {
+        if (!serverMonitor) {
+            alert('No server monitor data available to export.');
+            return;
+        }
+        
+        const exportData = {
+            serverID: currentServerID,
+            serverName: currentServerName,
+            exportDate: new Date().toISOString(),
+            alerts: serverMonitor.alerts,
+            activityLog: serverMonitor.activityLog,
+            settings: serverMonitor.settings,
+            savedPlayers: serverMonitor.savedPlayers,
+            recentAlerts: serverMonitor.recentAlerts,
+            playerDatabase: serverMonitor.playerDatabase,
+            populationHistory: serverMonitor.populationHistory
+        };
+        
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `battlemetrics_monitor_server_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        alert('Current server data exported successfully!');
+    };
+
+    window.exportAllServers = () => {
+        const allData = {};
+        let hasData = false;
+        
+        // Collect all BattleMetrics Monitor data from localStorage
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.startsWith('bms_')) {
+                try {
+                    const value = localStorage.getItem(key);
+                    allData[key] = JSON.parse(value);
+                    hasData = true;
+                } catch (e) {
+                    // If parsing fails, store as string
+                    allData[key] = localStorage.getItem(key);
+                    hasData = true;
+                }
+            }
+        }
+        
+        if (!hasData) {
+            alert('No BattleMetrics Monitor data found to export.');
+            return;
+        }
+        
+        const exportData = {
+            exportDate: new Date().toISOString(),
+            exportType: 'all_servers',
+            currentServerID: currentServerID,
+            data: allData
+        };
+        
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `battlemetrics_monitor_all_data_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        const serverCount = Object.keys(allData).filter(key => key.includes('_player_alerts_')).length;
+        alert(`All data exported successfully!\nIncluded data from ${serverCount} servers.`);
+    };
+
+    window.removeSavedPlayer = (playerId) => {
+        if (serverMonitor) {
+            serverMonitor.removeSavedPlayer(playerId);
+            serverMonitor.updateSavedPlayersDisplay();
+            
+            // Clear search cache to ensure fresh results
+            if (typeof cachedSearchResults !== 'undefined') {
+                cachedSearchResults.clear();
+            }
+            
+            // Refresh search results to update button states
+            const searchInput = document.getElementById('player-search');
+            if (searchInput && searchInput.value.length >= 2) {
+                handlePlayerSearch(searchInput.value);
+            }
+        }
+    };
+
+    // Filter functions
+    window.filterActivity = (filterType) => {
+        if (!serverMonitor) return;
+        
+        const activityDiv = document.getElementById('recent-activity-list');
+        if (!activityDiv) return;
+
+        let filteredActivity = [...serverMonitor.activityLog];
+        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+
+        switch (filterType) {
+            case 'joined':
+                filteredActivity = filteredActivity.filter(entry => entry.action === 'joined');
+                break;
+            case 'left':
+                filteredActivity = filteredActivity.filter(entry => entry.action === 'left');
+                break;
+            case 'recent':
+                filteredActivity = filteredActivity.filter(entry => entry.timestamp >= oneHourAgo);
+                break;
+            case 'all':
+            default:
+                // Show all
+                break;
+        }
+
+        // Display filtered results
+        filteredActivity = filteredActivity.slice(-100).reverse(); // Last 100, most recent first
+        
+        if (filteredActivity.length === 0) {
+            activityDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No activity matches filter</div>';
+            return;
+        }
+
+        let activityHTML = '';
+        filteredActivity.forEach(entry => {
+            const timeAgo = toRelativeTime(entry.timestamp);
+            const actionColor = entry.action === 'joined' ? '#28a745' : '#dc3545';
+            const hasAlert = serverMonitor.alerts[entry.playerId];
+            const isSaved = serverMonitor.savedPlayers[entry.playerId];
+            
+            activityHTML += `
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
+                    <div style="flex: 1;">
+                        <div style="color: ${actionColor}; font-weight: bold;">
+                            ${entry.playerName} ${entry.action} the game
+                            ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
+                            ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                        </div>
+                        <div style="opacity: 0.7; font-size: 11px;">${timeAgo} - ${entry.time} - ID: ${entry.playerId}</div>
+                    </div>
+                    <div style="display: flex; gap: 3px;">
+                        <button onclick="window.open('https://www.battlemetrics.com/players/${entry.playerId}', '_blank')" 
+                                style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                title="View Profile">
+                            Profile
+                        </button>
+                        <button onclick="togglePlayerAlert('${entry.playerName}', '${entry.playerId}')" 
+                                style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
+                            ${hasAlert ? 'Remove' : 'Add Alert'}
+                        </button>
+                    </div>
+                </div>
+            `;
+        });
+
+        activityDiv.innerHTML = activityHTML;
+    };
+
+    window.clearActivityFilter = () => {
+        const filterSelect = document.getElementById('activity-filter');
+        if (filterSelect) {
+            filterSelect.value = 'all';
+            filterActivity('all');
+        }
+    };
+
+    window.filterDatabase = (filterType) => {
+        if (!serverMonitor) return;
+        
+        const databaseDiv = document.getElementById('player-database-list');
+        if (!databaseDiv) return;
+
+        let filteredPlayers = Object.values(serverMonitor.playerDatabase);
+        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+
+        switch (filterType) {
+            case 'online':
+                filteredPlayers = filteredPlayers.filter(player => serverMonitor.currentPlayers.has(player.id));
+                break;
+            case 'offline':
+                filteredPlayers = filteredPlayers.filter(player => !serverMonitor.currentPlayers.has(player.id));
+                break;
+            case 'recent-left':
+                // Players who were seen recently but are now offline
+                filteredPlayers = filteredPlayers.filter(player => 
+                    !serverMonitor.currentPlayers.has(player.id) && player.lastSeen >= oneHourAgo
+                );
+                break;
+            case 'name-changed':
+                filteredPlayers = filteredPlayers.filter(player => player.nameChanged);
+                break;
+            case 'all':
+            default:
+                // Show all
+                break;
+        }
+
+        // Sort by online status first, then by last seen
+        filteredPlayers.sort((a, b) => {
+            const aOnline = serverMonitor.currentPlayers.has(a.id);
+            const bOnline = serverMonitor.currentPlayers.has(b.id);
+            
+            if (aOnline && !bOnline) return -1;
+            if (!aOnline && bOnline) return 1;
+            
+            return b.lastSeen - a.lastSeen;
+        });
+
+        if (filteredPlayers.length === 0) {
+            databaseDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players match filter</div>';
+            return;
+        }
+
+        serverMonitor.renderDatabasePlayers(filteredPlayers, databaseDiv);
+    };
+
+    window.clearDatabaseFilter = () => {
+        const filterSelect = document.getElementById('database-filter');
+        if (filterSelect) {
+            filterSelect.value = 'all';
+            filterDatabase('all');
+        }
+    };
+
+    window.testSound = () => {
+        if (serverMonitor) {
+            console.log('Testing alert sound...');
+            serverMonitor.playAlertSound();
+        }
+    };
+
+    // Debug Console Functions
+    window.toggleDebugMode = (enabled) => {
+        console.log('[Debug Console] toggleDebugMode called with:', enabled);
+        debugConsole.saveDebugSetting(enabled);
+        const debugSection = document.getElementById('debug-console-section');
+        console.log('[Debug Console] debugSection found:', !!debugSection);
+        
+        if (debugSection) {
+            debugSection.style.display = enabled ? 'block' : 'none';
+            console.log('[Debug Console] Section display set to:', enabled ? 'block' : 'none');
+        }
+        
+        if (enabled) {
+            debugConsole.info('Debug mode enabled by user');
+            console.log('[Debug Console] Current logs count:', debugConsole.logs.length);
+            // Force refresh the debug display
+            setTimeout(() => {
+                console.log('[Debug Console] Refreshing stats and display...');
+                refreshDebugStats();
+                debugConsole.updateDebugDisplay();
+            }, 100);
+        } else {
+            debugConsole.info('Debug mode disabled by user');
+        }
+    };
+
+    window.exportDebugLogs = () => {
+        debugConsole.exportLogs();
+    };
+
+    window.clearDebugLogs = () => {
+        debugConsole.clearLogs();
+        refreshDebugStats();
+    };
+
+    window.copyDebugLogs = () => {
+        if (!debugConsole) {
+            console.error('Debug console not initialized');
+            return;
+        }
+
+        const debugText = debugConsole.getLogsAsText();
+        
+        navigator.clipboard.writeText(debugText).then(() => {
+            // Show success feedback
+            const copyBtn = document.querySelector('button[onclick="copyDebugLogs()"]');
+            if (copyBtn) {
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = 'Copied!';
+                copyBtn.style.background = '#28a745';
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                    copyBtn.style.background = '#6c757d';
+                }, 2000);
+            }
+        }).catch(() => {
+            // Fallback for older browsers
+            const textArea = document.createElement('textarea');
+            textArea.value = debugText;
+            document.body.appendChild(textArea);
+            textArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textArea);
+
+            const copyBtn = document.querySelector('button[onclick="copyDebugLogs()"]');
+            if (copyBtn) {
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = 'Copied!';
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                }, 2000);
+            }
+        });
+    };
+
+
+
+    // Test function for debug console
+    window.testDebugConsole = () => {
+        console.log('[Debug Console] testDebugConsole called');
+        if (!debugConsole) {
+            alert('Debug console not initialized!');
+            return;
+        }
+        
+        console.log('[Debug Console] Adding test messages...');
+        debugConsole.debug('Test debug message from user');
+        debugConsole.info('Test info message from user');
+        debugConsole.warn('Test warning message from user');
+        debugConsole.error('Test error message from user');
+        
+        console.log('[Debug Console] Current logs after test:', debugConsole.logs.length);
+        
+        // Force refresh
+        setTimeout(() => {
+            console.log('[Debug Console] Forcing refresh...');
+            refreshDebugStats();
+        }, 100);
+        
+        console.log('Test messages added to debug console. Check the debug console section.');
+    };
+
+    // Global function to check debug console status
+    window.checkDebugConsole = () => {
+        console.log('=== Debug Console Status ===');
+        console.log('debugConsole exists:', !!debugConsole);
+        if (debugConsole) {
+            console.log('debugConsole.enabled:', debugConsole.enabled);
+            console.log('debugConsole.logs.length:', debugConsole.logs.length);
+            console.log('Recent logs:', debugConsole.logs.slice(-5));
+        }
+        console.log('debug-console-section exists:', !!document.getElementById('debug-console-section'));
+        console.log('debug-console-list exists:', !!document.getElementById('debug-console-list'));
+        console.log('debug-stats exists:', !!document.getElementById('debug-stats'));
+        console.log('============================');
+    };
+
+    // Global function to check UI elements
+    window.checkAlertUI = () => {
+        console.log('=== Alert UI Check ===');
+        const alertDiv = document.getElementById('alert-players-list');
+        const alertCount = document.getElementById('alert-count');
+        const alertToggle = document.getElementById('alertplayers-toggle');
+        
+        console.log('alert-players-list exists:', !!alertDiv);
+        console.log('alert-count exists:', !!alertCount);
+        console.log('alertplayers-toggle exists:', !!alertToggle);
+        
+        if (alertDiv) {
+            console.log('Alert div display:', alertDiv.style.display);
+            console.log('Alert div innerHTML length:', alertDiv.innerHTML.length);
+            console.log('Alert div content preview:', alertDiv.innerHTML.substring(0, 100));
+        }
+        
+        if (alertCount) {
+            console.log('Alert count text:', alertCount.textContent);
+        }
+        
+        console.log('======================');
+    };
+
+    // Direct test function to force update alert display
+    window.forceUpdateAlerts = () => {
+        console.log('=== Force Update Alerts ===');
+        if (!serverMonitor) {
+            console.log('ServerMonitor not available');
+            return;
+        }
+        
+        console.log('Current alerts before update:', serverMonitor.alerts);
+        console.log('Forcing updateAlertDisplay...');
+        
+        try {
+            serverMonitor.updateAlertDisplay();
+            console.log('updateAlertDisplay completed');
+        } catch (error) {
+            console.error('Error calling updateAlertDisplay:', error);
+        }
+        
+        setTimeout(() => {
+            checkAlertUI();
+        }, 100);
+        
+        console.log('===============================');
+    };
+
+    // Function to manually add alert and update display
+    window.manualAddAlert = (playerName, playerId) => {
+        console.log('=== Manual Add Alert ===');
+        if (!serverMonitor) {
+            console.log('ServerMonitor not available');
+            return;
+        }
+        
+        console.log('Adding alert manually for:', playerName, playerId);
+        
+        // Add alert directly
+        serverMonitor.alerts[playerId] = {
+            name: playerName,
+            type: 'both',
+            added: Date.now()
+        };
+        serverMonitor.saveAlerts();
+        
+        console.log('Alert added. Current alerts:', serverMonitor.alerts);
+        
+        // Force update display
+        const alertDiv = document.getElementById('alert-players-list');
+        if (alertDiv) {
+            const alertCount = Object.keys(serverMonitor.alerts).length;
+            if (alertCount === 0) {
+                alertDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players with alerts</div>';
+            } else {
+                let alertHTML = '';
+                Object.keys(serverMonitor.alerts).forEach(id => {
+                    const alert = serverMonitor.alerts[id];
+                    alertHTML += `
+                        <div style="padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(255, 193, 7, 0.1); border-left: 3px solid #ffc107;">
+                            <div style="color: #ffc107; font-weight: bold; font-size: 12px;">
+                                ${alert.name} [MANUAL TEST]
+                            </div>
+                            <div style="font-size: 10px; opacity: 0.7;">ID: ${id}</div>
+                        </div>
+                    `;
+                });
+                alertDiv.innerHTML = alertHTML;
+            }
+            
+            // Update count
+            const alertCountSpan = document.getElementById('alert-count');
+            if (alertCountSpan) {
+                alertCountSpan.textContent = alertCount;
+            }
+            
+            console.log('Display updated manually');
+        } else {
+            console.log('Alert div not found!');
+        }
+        
+        console.log('========================');
+    };
+
+
+
+    // Cleanup function to remove UI elements when leaving server pages
+    const cleanup = () => {
+        // Stop monitoring
+        if (serverMonitor) {
+            serverMonitor.stopMonitoring();
+            serverMonitor.stopAlertReminders();
+        }
+        
+        // Clear intervals
+        if (monitoringInterval) {
+            clearInterval(monitoringInterval);
+            monitoringInterval = null;
+        }
+        if (alertReminderInterval) {
+            clearInterval(alertReminderInterval);
+            alertReminderInterval = null;
+        }
+        if (populationStatsInterval) {
+            clearInterval(populationStatsInterval);
+            populationStatsInterval = null;
+        }
+        if (timestampRefreshInterval) {
+            clearInterval(timestampRefreshInterval);
+            timestampRefreshInterval = null;
+        }
+        
+        // Remove UI elements
+        const toggleBtn = document.getElementById(TOGGLE_BUTTON_ID);
+        const monitor = document.getElementById(SERVER_MONITOR_ID);
+        const alertPanel = document.getElementById(ALERT_PANEL_ID);
+        
+        if (toggleBtn) toggleBtn.remove();
+        if (monitor) monitor.remove();
+        if (alertPanel) alertPanel.remove();
+        
+        // Reset variables
+        currentServerID = null;
+        serverMonitor = null;
+        lastPlayerList = new Map();
+        currentServerName = '';
+        activePlayerSearch = '';
+        activeDatabaseSearch = '';
+        
+        console.log('BattleMetrics Monitor - Cleaned up UI elements');
+    };
+
+    // Initialize when page loads
+    const initialize = () => {
+        debugConsole.info('Starting initialization...');
+        
+        // Always cleanup first to remove any existing UI elements
+        cleanup();
+        
+        // Check if we're on a server page - extract the actual server ID number
+        const serverMatch = window.location.pathname.match(/\/servers\/[^\/]+\/(\d+)/);
+        if (!serverMatch) {
+            debugConsole.info('Not on a server page, skipping initialization');
+            return;
+        }
+
+        const newServerID = serverMatch[1];
+        
+        // Debug logging
+        debugConsole.debug('Current URL: ' + window.location.pathname);
+        debugConsole.info('Extracted Server ID: ' + newServerID);
+        
+        // Check if we're already initialized for this server
+        if (currentServerID === newServerID && serverMonitor) {
+            debugConsole.info('Already initialized for this server, recreating UI...');
+            // Recreate UI elements to ensure they're visible after navigation
+            createToggleButton();
+            createServerMonitor();
+            
+            // Update displays
+            setTimeout(() => {
+                if (serverMonitor) {
+                    serverMonitor.updateAlertDisplay();
+                    serverMonitor.updateSavedPlayersDisplay();
+                    serverMonitor.updateRecentAlertsDisplay();
+                    serverMonitor.updateDatabaseDisplay();
+                }
+            }, 500);
+            return;
+        }
+        
+        currentServerID = newServerID;
+        
+        // Initialize server-specific storage keys
+        initializeStorageKeys(currentServerID);
+        
+        // Get server name from page with retry logic
+        const getServerName = () => {
+            // Helper function to clean extracted text from CSS and unwanted content
+            const cleanServerName = (text) => {
+                if (!text) return '';
+                
+                // Remove CSS content (anything that looks like CSS rules)
+                let cleaned = text.replace(/\.css-[a-zA-Z0-9-]+\{[^}]*\}/g, '');
+                
+                // Remove any remaining CSS-like patterns
+                cleaned = cleaned.replace(/\{[^}]*\}/g, '');
+                cleaned = cleaned.replace(/\.css-[a-zA-Z0-9-]+/g, '');
+                
+                // Remove common CSS properties and values
+                cleaned = cleaned.replace(/(display|margin|padding|font|color|background|border|width|height|position|top|left|right|bottom):[^;]*;?/gi, '');
+                
+                // Remove "Real-time player tracking & alerts" text
+                cleaned = cleaned.replace(/Real-time\s+player\s+tracking\s*&\s*alerts/gi, '');
+                
+                // Remove "Server Monitor" text if it appears at the start
+                cleaned = cleaned.replace(/^Server\s+Monitor/i, '');
+                
+                // Remove Server ID pattern
+                cleaned = cleaned.replace(/Server\s+ID:\s*\d+/gi, '');
+                
+                // Clean up whitespace and special characters
+                cleaned = cleaned.replace(/\s+/g, ' ').trim();
+                
+                // Remove any remaining non-printable characters
+                cleaned = cleaned.replace(/[^\x20-\x7E]/g, '');
+                
+                return cleaned;
+            };
+            
+            // Try multiple selectors for BattleMetrics server name
+            const selectors = [
+                'h2.css-u0fcdd',  // BattleMetrics specific server name class
+                'h1',
+                'h2',
+                '.server-name',
+                '[data-testid="server-name"]',
+                'h1.server-title',
+                'h2.server-title',
+                '.server-header h1',
+                '.server-header h2',
+                '.server-info h1',
+                '.server-info h2',
+                'header h1',
+                'header h2',
+                '.page-header h1',
+                '.page-header h2',
+                '.server-details h1',
+                '.server-details h2',
+                'h1[class*="server"]',
+                'h2[class*="server"]',
+                'h1[class*="css-"]',
+                'h2[class*="css-"]',
+                '.server-name-display',
+                '.title h1',
+                '.title h2'
+            ];
+            
+            let serverNameElement = null;
+            let rawText = '';
+            
+            for (const selector of selectors) {
+                serverNameElement = document.querySelector(selector);
+                if (serverNameElement) {
+                    rawText = serverNameElement.textContent || serverNameElement.innerText || '';
+                    const cleanedName = cleanServerName(rawText);
+                    
+                    // Only accept if we have a reasonable server name (not empty, not just CSS)
+                    if (cleanedName && cleanedName.length > 3 && !cleanedName.match(/^(css-|Server\s*$|undefined|null)/i)) {
+                        currentServerName = cleanedName;
+                        debugConsole.info('Server name found via selector "' + selector + '": ' + currentServerName);
+                        debugConsole.debug('Raw text was: ' + rawText.substring(0, 100) + (rawText.length > 100 ? '...' : ''));
+                        break;
+                    }
+                }
+            }
+            
+            // If we still don't have a good server name, try page title
+            if (!currentServerName || currentServerName.length < 3) {
+                const title = document.title;
+                if (title && title !== 'BattleMetrics') {
+                    // Remove common suffixes from title
+                    const cleanTitle = title.replace(/\s*-\s*BattleMetrics.*$/i, '').trim();
+                    if (cleanTitle && cleanTitle !== 'Server' && cleanTitle.length > 3) {
+                        currentServerName = cleanTitle;
+                        debugConsole.info('Server name extracted from page title: ' + currentServerName);
+                        // Update UI immediately
+                        const serverNameSpan = document.getElementById('current-server-name');
+                        if (serverNameSpan) {
+                            serverNameSpan.textContent = currentServerName;
+                        }
+                        return;
+                    }
+                }
+                
+                currentServerName = `Server ${currentServerID}`;
+                debugConsole.warn('Server name not found, using default');
+            }
+            
+            // Update UI with the found server name
+            const serverNameSpan = document.getElementById('current-server-name');
+            if (serverNameSpan) {
+                serverNameSpan.textContent = currentServerName;
+            }
+        };
+        
+        // Try to get server name immediately, then retry after a delay
+        getServerName();
+        setTimeout(getServerName, 1000);
+
+        // Initialize components with error handling
+        try {
+            debugConsole.debug('Creating new ServerMonitor instance...');
+            serverMonitor = new ServerMonitor();
+            debugConsole.info('ServerMonitor initialized successfully');
+            
+            // Verify critical methods exist
+            if (typeof serverMonitor.addAlert !== 'function') {
+                throw new Error('ServerMonitor.addAlert method missing');
+            }
+            if (typeof serverMonitor.removeAlert !== 'function') {
+                throw new Error('ServerMonitor.removeAlert method missing');
+            }
+            
+            debugConsole.info('All ServerMonitor methods verified');
+            
+        } catch (error) {
+            debugConsole.error('Failed to initialize ServerMonitor', error);
+            alert('Server Monitor failed to initialize. Please refresh the page.');
+            return;
+        }
+        
+        // Create UI with retry logic
+        const createUI = () => {
+            try {
+                debugConsole.debug('Creating toggle button...');
+                createToggleButton();
+                debugConsole.debug('Creating server monitor UI...');
+                createServerMonitor();
+                debugConsole.info('UI created successfully');
+            } catch (error) {
+                debugConsole.error('Error creating UI', error);
+                // Retry after a short delay
+                setTimeout(createUI, 1000);
+            }
+        };
+        
+        createUI();
+        
+        // Update server ID and name display
+        setTimeout(() => {
+            const serverIdSpan = document.getElementById('current-server-id');
+            if (serverIdSpan) {
+                serverIdSpan.textContent = currentServerID;
+            }
+            
+            const serverNameSpan = document.getElementById('current-server-name');
+            if (serverNameSpan) {
+                serverNameSpan.textContent = currentServerName || 'Loading...';
+            }
+        }, 500);
+        
+        // Start monitoring by default
+        // Wait longer for page to fully load before starting monitoring
+        setTimeout(() => {
+            if (serverMonitor && !serverMonitor.isMonitoring) {
+                console.log('Auto-starting monitoring after page load delay...');
+                serverMonitor.startMonitoring();
+                const btn = document.getElementById('monitoring-btn');
+                if (btn) {
+                    btn.textContent = 'Stop Monitoring';
+                    btn.style.background = '#dc3545';
+                }
+            }
+        }, 3000); // Increased from 2000ms to 3000ms
+        
+        // Update counts less frequently to reduce lag
+        setInterval(() => {
+            if (!serverMonitor) return;
+            
+            const playerCountSpan = document.getElementById('player-count');
+            const alertCountSpan = document.getElementById('alert-count');
+            const savedCountSpan = document.getElementById('saved-count');
+            const recentAlertsCountSpan = document.getElementById('recent-alerts-count');
+            const activityCountSpan = document.getElementById('activity-count');
+            const databaseCountSpan = document.getElementById('database-count');
+            
+            if (playerCountSpan) playerCountSpan.textContent = serverMonitor.currentPlayers.size;
+            if (alertCountSpan) alertCountSpan.textContent = Object.keys(serverMonitor.alerts).length;
+            if (savedCountSpan) savedCountSpan.textContent = Object.keys(serverMonitor.savedPlayers).length;
+            if (activityCountSpan) activityCountSpan.textContent = serverMonitor.activityLog.length;
+            if (databaseCountSpan) databaseCountSpan.textContent = Object.keys(serverMonitor.playerDatabase).length;
+            
+            if (recentAlertsCountSpan) {
+                const unacknowledged = Object.values(serverMonitor.recentAlerts).filter(alert => !alert.acknowledged);
+                recentAlertsCountSpan.textContent = unacknowledged.length;
+            }
+            
+            // Also update the alert and saved displays to show current online/offline status
+            serverMonitor.updateAlertDisplay();
+            serverMonitor.updateSavedPlayersDisplay();
+        }, 3000); // Reduced from 1000ms to 3000ms
+
+        // Initialize displays
+        setTimeout(() => {
+            if (serverMonitor) {
+                console.log('Initializing server monitor displays...');
+                serverMonitor.updateAlertDisplay();
+                serverMonitor.updateSavedPlayersDisplay();
+                serverMonitor.updateRecentAlertsDisplay();
+                serverMonitor.updateDatabaseDisplay();
+                
+                // Start alert reminders if there are unacknowledged alerts
+                const unacknowledged = Object.values(serverMonitor.recentAlerts).filter(alert => !alert.acknowledged);
+                if (unacknowledged.length > 0) {
+                    serverMonitor.startAlertReminders();
+                }
+                
+                console.log('Server monitor initialized successfully');
+            }
+        }, 3000);
+
+        console.log('BattleMetrics Server Monitor initialized for server:', currentServerID);
+    };
+
+    // Wait for page to load and initialize with better timing
+    const initializeWhenReady = () => {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => {
+                setTimeout(initialize, 1000);
+            });
+        } else {
+            // Page already loaded, initialize immediately but with a small delay
+            setTimeout(initialize, 500);
+        }
+    };
+    
+    // Try to initialize immediately if we're on a server page
+    if (/\/servers\/[^\/]+\/\d+/.test(window.location.pathname)) {
+        initializeWhenReady();
+        
+
+    }
+    
+    // Also set up a fallback initialization check
+    setTimeout(() => {
+        if (!document.getElementById(TOGGLE_BUTTON_ID) && /\/servers\/[^\/]+\/\d+/.test(window.location.pathname)) {
+            console.log('BattleMetrics Monitor - Fallback initialization triggered');
+            initialize();
+        }
+    }, 3000);
+
+    // SIMPLE BRUTE FORCE APPROACH - Just reload if on server page without UI
+    // Auto-initialization functionality (similar to player script)
+    let lastURL = window.location.href;
+    let autoInitInterval = null;
+    
+    const startAutoInit = () => {
+        if (autoInitInterval) return; // Already running
+        
+        debugConsole.info('Starting auto-initialization functionality');
+        
+        // Check immediately if we're on a server page
+        checkAndInitializeServer();
+        
+        // Set up interval to check for server page changes
+        autoInitInterval = setInterval(() => {
+            checkAndInitializeServer();
+        }, 1000); // Check every 1 second
+    };
+
+    const stopAutoInit = () => {
+        if (autoInitInterval) {
+            clearInterval(autoInitInterval);
+            autoInitInterval = null;
+            debugConsole.info('Auto-initialization functionality stopped');
+        }
+    };
+
+    const checkAndInitializeServer = () => {
+        const currentURL = window.location.href;
+        
+        // Check if we're on a server page
+        if (!currentURL.includes('/servers/')) {
+            // Clear current server ID if we're not on a server page
+            if (currentServerID) {
+                debugConsole.info('Left server page, cleaning up');
+                cleanup();
+                currentServerID = null;
+            }
+            return;
+        }
+        
+        // Extract server ID from URL
+        const serverMatch = currentURL.match(/\/servers\/rust\/(\d+)/);
+        if (!serverMatch) {
+            return;
+        }
+        
+        const serverID = serverMatch[1];
+        
+        // Check if this is a new server or URL changed
+        if (currentServerID !== serverID || lastURL !== currentURL) {
+            debugConsole.info(`Auto-initializing for server ${serverID}`);
+            lastURL = currentURL;
+            
+            // Initialize for the new server
+            setTimeout(() => {
+                initialize();
+            }, 500);
+        }
+    };
+    
+    // Start auto-initialization system
+    console.log('BattleMetrics Monitor - Starting auto-initialization system...');
+    startAutoInit();
+    
+    // That's it! Now it should catch SPA navigation!
+    
+
+
+})();
