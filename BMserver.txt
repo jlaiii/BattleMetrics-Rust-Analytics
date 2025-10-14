@@ -252,6 +252,7 @@ User Agent: ${navigator.userAgent}
     let currentPopulation = 0;
     let lastHourChange = 0;
     let predictedNextHour = 0;
+    let predictionConfidence = 0;
     
     // Search state tracking to prevent interference
     let activePlayerSearch = '';
@@ -340,6 +341,7 @@ User Agent: ${navigator.userAgent}
                 this.currentPlayers = new Map();
                 this.soundEnabled = this.settings.soundEnabled !== false;
                 this.autoRefreshInterval = null;
+                this.autoRefreshCountdownInterval = null;
                 
                 // Initialize other properties
                 this.activityLog = [];
@@ -348,6 +350,9 @@ User Agent: ${navigator.userAgent}
                 this.playerDatabase = {};
                 this.populationHistory = [];
                 this.lastPlayerState = new Map();
+                this.predictionConfidence = 0;
+                this.historicalAccuracy = null;
+                this.serverEventDetected = false;
                 
                 console.log('✅ ServerMonitor core properties initialized');
                 
@@ -560,12 +565,13 @@ User Agent: ${navigator.userAgent}
                 this.saveRecentAlerts();
                 this.updateRecentAlertsDisplay();
                 
+                // Always trigger reorder check after acknowledging any alert
+                setTimeout(() => this.reorderSectionsIfNeeded(), 100);
+                
                 // Check if all alerts are acknowledged
                 const unacknowledged = Object.values(this.recentAlerts).filter(alert => !alert.acknowledged);
                 if (unacknowledged.length === 0) {
                     this.stopAlertReminders();
-                    // Trigger reorder when all alerts are acknowledged
-                    setTimeout(() => this.reorderSectionsIfNeeded(), 100);
                 }
             }
         }
@@ -688,6 +694,9 @@ User Agent: ${navigator.userAgent}
                         const oldest = new Date(filteredHistory[0].timestamp).toLocaleString();
                         const newest = new Date(filteredHistory[filteredHistory.length - 1].timestamp).toLocaleString();
                         console.log(`Population data range: ${oldest} to ${newest}`);
+                        
+                        // Calculate prediction accuracy from historical data
+                        this.calculatePredictionAccuracy(filteredHistory);
                     }
                     
                     return filteredHistory;
@@ -697,6 +706,44 @@ User Agent: ${navigator.userAgent}
             } catch (e) {
                 console.error('Failed to load population history:', e);
                 return [];
+            }
+        }
+        
+        calculatePredictionAccuracy(history) {
+            try {
+                let accuracySum = 0;
+                let accuracyCount = 0;
+                
+                // Look for entries with predictions to validate
+                for (let i = 0; i < history.length - 1; i++) {
+                    const entry = history[i];
+                    if (entry.prediction) {
+                        // Find actual population about 1 hour later
+                        const oneHourLater = entry.timestamp + (60 * 60 * 1000);
+                        const actualEntry = history.find(h => 
+                            Math.abs(h.timestamp - oneHourLater) < (10 * 60 * 1000) // 10 min tolerance
+                        );
+                        
+                        if (actualEntry) {
+                            const error = Math.abs(entry.prediction - actualEntry.count);
+                            const relativeError = error / Math.max(actualEntry.count, 1);
+                            const accuracy = Math.max(0, 1 - relativeError);
+                            
+                            accuracySum += accuracy;
+                            accuracyCount++;
+                        }
+                    }
+                }
+                
+                if (accuracyCount > 0) {
+                    this.historicalAccuracy = accuracySum / accuracyCount;
+                    console.log(`Historical prediction accuracy: ${(this.historicalAccuracy * 100).toFixed(1)}% (${accuracyCount} predictions)`);
+                } else {
+                    this.historicalAccuracy = null;
+                }
+            } catch (e) {
+                console.error('Error calculating prediction accuracy:', e);
+                this.historicalAccuracy = null;
             }
         }
 
@@ -840,7 +887,9 @@ User Agent: ${navigator.userAgent}
                 count: populationToRecord,
                 trackedCount: trackedCount, // Keep for debugging
                 actualCount: actualPopulation, // Keep for debugging
-                date: new Date(now).toLocaleString()
+                date: new Date(now).toLocaleString(),
+                prediction: predictedNextHour, // Store current prediction for future validation
+                confidence: this.predictionConfidence || 0
             };
             
             this.populationHistory.push(entry);
@@ -888,6 +937,7 @@ User Agent: ${navigator.userAgent}
             const now = Date.now();
             const twoHoursAgo = now - (2 * 60 * 60 * 1000);
             const oneHourAgo = now - (60 * 60 * 1000);
+            const sixHoursAgo = now - (6 * 60 * 60 * 1000);
             
             // Get current population - try to use actual UI count first
             const actualPopulation = this.getActualPopulationFromUI();
@@ -903,21 +953,30 @@ User Agent: ${navigator.userAgent}
                 currentPopulation = this.currentPlayers.size;
             }
             
-            // Get last 2 hours of data for better prediction
-            const recentHistory = this.populationHistory.filter(entry => entry.timestamp >= twoHoursAgo);
+            // Detect potential server events (wipes, restarts, etc.)
+            this.serverEventDetected = this.detectServerEvents();
             
-            console.log(`Population stats calculation: Current=${currentPopulation}, History entries=${recentHistory.length}, Total history=${this.populationHistory.length}`);
+            // Get extended history for better pattern recognition
+            const recentHistory = this.populationHistory.filter(entry => entry.timestamp >= sixHoursAgo);
+            const twoHourHistory = recentHistory.filter(entry => entry.timestamp >= twoHoursAgo);
             
-            if (recentHistory.length < 2) {
-                // Not enough data, predict same as current
+            console.log(`Population stats calculation: Current=${currentPopulation}, Recent=${twoHourHistory.length}, Extended=${recentHistory.length}`);
+            
+            // Calculate confidence based on data availability
+            let confidence = Math.min(recentHistory.length / 50, 1.0); // Max confidence at 50+ data points
+            
+            if (twoHourHistory.length < 2) {
+                // Not enough recent data, predict same as current with low confidence
                 lastHourChange = 0;
                 predictedNextHour = currentPopulation;
-                console.log('Not enough historical data for prediction');
+                confidence = 0.1;
+                console.log('Insufficient recent data for prediction - using current population');
+                this.predictionConfidence = confidence;
                 return;
             }
             
             // Find population from one hour ago
-            const oneHourAgoEntry = recentHistory
+            const oneHourAgoEntry = twoHourHistory
                 .filter(entry => entry.timestamp >= oneHourAgo - 300000) // 5 min buffer
                 .sort((a, b) => Math.abs(a.timestamp - oneHourAgo) - Math.abs(b.timestamp - oneHourAgo))[0];
             
@@ -927,41 +986,240 @@ User Agent: ${navigator.userAgent}
                 lastHourChange = 0;
             }
             
-            // Advanced prediction using weighted average of recent trends
+            // Enhanced prediction with multiple methods
+            let predictions = [];
+            let weights = [];
+            
+            // Method 1: Weighted trend analysis (improved)
+            const trendPrediction = this.calculateTrendPrediction(twoHourHistory, now);
+            if (trendPrediction !== null) {
+                predictions.push(trendPrediction);
+                weights.push(0.4);
+            }
+            
+            // Method 2: Time-of-day pattern analysis
+            const patternPrediction = this.calculatePatternPrediction(recentHistory, now);
+            if (patternPrediction !== null) {
+                predictions.push(patternPrediction);
+                weights.push(0.3);
+            }
+            
+            // Method 3: Momentum-based prediction
+            const momentumPrediction = this.calculateMomentumPrediction(twoHourHistory, now);
+            if (momentumPrediction !== null) {
+                predictions.push(momentumPrediction);
+                weights.push(0.2);
+            }
+            
+            // Method 4: Regression-based prediction for longer history
+            if (recentHistory.length > 20) {
+                const regressionPrediction = this.calculateRegressionPrediction(recentHistory, now);
+                if (regressionPrediction !== null) {
+                    predictions.push(regressionPrediction);
+                    weights.push(0.1);
+                }
+            }
+            
+            // Combine predictions using weighted average
+            if (predictions.length > 0) {
+                const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+                const normalizedWeights = weights.map(w => w / totalWeight);
+                
+                const combinedPrediction = predictions.reduce((sum, pred, i) => 
+                    sum + (pred * normalizedWeights[i]), 0);
+                
+                // Apply bounds and smoothing
+                let maxChange = Math.max(20, currentPopulation * 0.5); // Max 50% change or 20 players
+                
+                // If server event detected, allow larger changes but reduce confidence
+                if (this.serverEventDetected) {
+                    maxChange = Math.max(50, currentPopulation * 0.8);
+                    confidence *= 0.5; // Reduce confidence during server events
+                    console.log('Server event detected - allowing larger prediction changes');
+                }
+                
+                const boundedPrediction = Math.max(0, Math.min(
+                    currentPopulation + maxChange,
+                    Math.max(currentPopulation - maxChange, combinedPrediction)
+                ));
+                
+                predictedNextHour = Math.round(boundedPrediction);
+                
+                // Adjust confidence based on prediction consistency
+                const predictionVariance = this.calculateVariance(predictions);
+                confidence *= Math.max(0.3, 1 - (predictionVariance / (currentPopulation + 1)));
+                
+                console.log(`Multi-method prediction: ${predictions.map((p, i) => `${p.toFixed(1)}(${(normalizedWeights[i]*100).toFixed(0)}%)`).join(', ')} -> ${predictedNextHour}`);
+            } else {
+                // Fallback to simple trend
+                predictedNextHour = Math.max(0, Math.round(currentPopulation + lastHourChange));
+                confidence = this.serverEventDetected ? 0.1 : 0.2;
+                console.log('Using fallback trend prediction');
+            }
+            
+            this.predictionConfidence = confidence;
+        }
+        
+        calculateTrendPrediction(history, now) {
+            if (history.length < 4) return null;
+            
             const weights = [];
             const changes = [];
             
-            // Calculate 15-minute interval changes over last 2 hours
-            for (let i = 15; i <= 120; i += 15) {
-                const timeAgo = now - (i * 60 * 1000);
-                const entry = recentHistory
+            // Calculate changes at multiple intervals with exponential weighting
+            const intervals = [10, 20, 30, 45, 60, 90, 120]; // minutes
+            
+            for (const intervalMin of intervals) {
+                const timeAgo = now - (intervalMin * 60 * 1000);
+                const entry = history
                     .filter(e => e.timestamp >= timeAgo - 120000) // 2 min buffer
                     .sort((a, b) => Math.abs(a.timestamp - timeAgo) - Math.abs(b.timestamp - timeAgo))[0];
                 
                 if (entry) {
                     const change = currentPopulation - entry.count;
-                    const intervalHours = i / 60;
+                    const intervalHours = intervalMin / 60;
                     const hourlyRate = change / intervalHours;
                     
-                    // Weight recent changes more heavily
-                    const weight = Math.pow(0.8, (i / 15) - 1); // Exponential decay
+                    // Weight recent changes more heavily, but not too aggressively
+                    const weight = Math.pow(0.85, Math.log(intervalMin / 10));
                     weights.push(weight);
                     changes.push(hourlyRate);
                 }
             }
             
-            if (changes.length > 0) {
-                // Calculate weighted average of hourly rates
-                const totalWeight = weights.reduce((sum, w) => sum + w, 0);
-                const weightedAverage = changes.reduce((sum, change, i) => sum + (change * weights[i]), 0) / totalWeight;
-                
-                // Apply some smoothing to avoid wild predictions
-                const smoothedPrediction = weightedAverage * 0.7 + (lastHourChange * 0.3);
-                predictedNextHour = Math.max(0, Math.round(currentPopulation + smoothedPrediction));
-            } else {
-                // Fallback to simple trend
-                predictedNextHour = Math.max(0, Math.round(currentPopulation + lastHourChange));
+            if (changes.length === 0) return null;
+            
+            const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+            const weightedAverage = changes.reduce((sum, change, i) => sum + (change * weights[i]), 0) / totalWeight;
+            
+            return currentPopulation + weightedAverage;
+        }
+        
+        calculatePatternPrediction(history, now) {
+            if (history.length < 10) return null;
+            
+            const currentHour = new Date(now).getHours();
+            const nextHour = (currentHour + 1) % 24;
+            
+            // Find historical data for the same hour of day
+            const sameHourData = history.filter(entry => {
+                const entryHour = new Date(entry.timestamp).getHours();
+                return entryHour === nextHour;
+            });
+            
+            if (sameHourData.length < 3) return null;
+            
+            // Calculate average population for this hour
+            const avgPopulation = sameHourData.reduce((sum, entry) => sum + entry.count, 0) / sameHourData.length;
+            
+            // Weight by recency - more recent same-hour data is more relevant
+            const weightedSum = sameHourData.reduce((sum, entry) => {
+                const age = now - entry.timestamp;
+                const weight = Math.exp(-age / (24 * 60 * 60 * 1000)); // Exponential decay over days
+                return sum + (entry.count * weight);
+            }, 0);
+            
+            const weightSum = sameHourData.reduce((sum, entry) => {
+                const age = now - entry.timestamp;
+                return sum + Math.exp(-age / (24 * 60 * 60 * 1000));
+            }, 0);
+            
+            const weightedAvg = weightedSum / weightSum;
+            
+            // Blend with current population to account for current trends
+            return (weightedAvg * 0.7) + (currentPopulation * 0.3);
+        }
+        
+        calculateMomentumPrediction(history, now) {
+            if (history.length < 6) return null;
+            
+            // Calculate acceleration (change in rate of change)
+            const recent = history.slice(-6); // Last 6 data points
+            const changes = [];
+            
+            for (let i = 1; i < recent.length; i++) {
+                const timeDiff = (recent[i].timestamp - recent[i-1].timestamp) / (60 * 60 * 1000); // hours
+                const popDiff = recent[i].count - recent[i-1].count;
+                if (timeDiff > 0) {
+                    changes.push(popDiff / timeDiff); // hourly rate
+                }
             }
+            
+            if (changes.length < 2) return null;
+            
+            // Calculate acceleration (change in hourly rate)
+            const accelerations = [];
+            for (let i = 1; i < changes.length; i++) {
+                accelerations.push(changes[i] - changes[i-1]);
+            }
+            
+            const avgAcceleration = accelerations.reduce((sum, acc) => sum + acc, 0) / accelerations.length;
+            const currentRate = changes[changes.length - 1];
+            
+            // Predict next hour rate and apply
+            const predictedRate = currentRate + avgAcceleration;
+            return currentPopulation + predictedRate;
+        }
+        
+        calculateRegressionPrediction(history, now) {
+            if (history.length < 15) return null;
+            
+            // Simple linear regression on recent data
+            const recentData = history.slice(-30); // Last 30 points
+            const n = recentData.length;
+            
+            // Convert timestamps to hours from start
+            const startTime = recentData[0].timestamp;
+            const x = recentData.map(entry => (entry.timestamp - startTime) / (60 * 60 * 1000));
+            const y = recentData.map(entry => entry.count);
+            
+            // Calculate regression coefficients
+            const sumX = x.reduce((sum, val) => sum + val, 0);
+            const sumY = y.reduce((sum, val) => sum + val, 0);
+            const sumXY = x.reduce((sum, val, i) => sum + (val * y[i]), 0);
+            const sumXX = x.reduce((sum, val) => sum + (val * val), 0);
+            
+            const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+            const intercept = (sumY - slope * sumX) / n;
+            
+            // Predict for one hour from now
+            const futureX = (now + 60 * 60 * 1000 - startTime) / (60 * 60 * 1000);
+            return intercept + slope * futureX;
+        }
+        
+        calculateVariance(values) {
+            if (values.length < 2) return 0;
+            const mean = values.reduce((sum, val) => sum + val, 0) / values.length;
+            const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+            return Math.sqrt(variance);
+        }
+        
+        detectServerEvents() {
+            if (this.populationHistory.length < 10) return false;
+            
+            const recent = this.populationHistory.slice(-10);
+            const now = Date.now();
+            const thirtyMinAgo = now - (30 * 60 * 1000);
+            
+            // Look for sudden population spikes or drops in last 30 minutes
+            const recentEntries = recent.filter(entry => entry.timestamp > thirtyMinAgo);
+            if (recentEntries.length < 3) return false;
+            
+            // Check for sudden changes
+            for (let i = 1; i < recentEntries.length; i++) {
+                const prev = recentEntries[i-1];
+                const curr = recentEntries[i];
+                const change = Math.abs(curr.count - prev.count);
+                const percentChange = change / Math.max(prev.count, 1);
+                
+                // Detect significant population changes (likely server events)
+                if (change > 20 && percentChange > 0.5) {
+                    console.log(`Server event detected: ${prev.count} -> ${curr.count} players (${(percentChange*100).toFixed(0)}% change)`);
+                    return true;
+                }
+            }
+            
+            return false;
         }
 
         updatePopulationDisplay() {
@@ -976,17 +1234,53 @@ User Agent: ${navigator.userAgent}
             const oldestEntry = this.populationHistory.length > 0 ? 
                 new Date(this.populationHistory[0].timestamp).toLocaleTimeString() : 'None';
             
+            // Calculate prediction confidence and display info
+            const confidence = this.predictionConfidence || 0;
+            const confidencePercent = Math.round(confidence * 100);
+            const confidenceColor = confidence > 0.7 ? '#28a745' : confidence > 0.4 ? '#ffc107' : '#dc3545';
+            const confidenceText = confidence > 0.7 ? 'High' : confidence > 0.4 ? 'Medium' : 'Low';
+            
+            // Calculate prediction change and trend
+            const predictionChange = predictedNextHour - currentPopulation;
+            const predictionChangeColor = predictionChange > 0 ? '#28a745' : predictionChange < 0 ? '#dc3545' : '#6c757d';
+            const predictionChangeSymbol = predictionChange > 0 ? '+' : '';
+            
+            // Trend indicators
+            let trendIcon = '';
+            let trendText = '';
+            if (Math.abs(predictionChange) <= 1) {
+                trendIcon = '→';
+                trendText = 'Stable';
+            } else if (predictionChange > 0) {
+                trendIcon = predictionChange > 5 ? '↗' : '↑';
+                trendText = predictionChange > 5 ? 'Rising' : 'Growing';
+            } else {
+                trendIcon = predictionChange < -5 ? '↘' : '↓';
+                trendText = predictionChange < -5 ? 'Falling' : 'Declining';
+            }
+            
+            // Data quality indicator
+            const recentDataCount = this.populationHistory.filter(entry => 
+                entry.timestamp > Date.now() - (2 * 60 * 60 * 1000)).length;
+            const dataQuality = recentDataCount > 50 ? 'Excellent' : 
+                               recentDataCount > 20 ? 'Good' : 
+                               recentDataCount > 5 ? 'Fair' : 'Poor';
+            const dataQualityColor = recentDataCount > 50 ? '#28a745' : 
+                                   recentDataCount > 20 ? '#17a2b8' : 
+                                   recentDataCount > 5 ? '#ffc107' : '#dc3545';
+            
             popDisplay.innerHTML = `
                 <div style="background: rgba(111, 66, 193, 0.1); padding: 10px; border-radius: 5px; margin-bottom: 10px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                         <div style="color: #6f42c1; font-weight: bold; font-size: 14px;">
-                            Population Stats
+                            Population Analytics
                         </div>
                         <div style="color: #6c757d; font-size: 10px;">
                             Updated: ${lastUpdated}
                         </div>
                     </div>
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                    
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                         <div>
                             <div style="color: white; font-size: 18px; font-weight: bold;">
                                 ${currentPopulation} players
@@ -994,19 +1288,59 @@ User Agent: ${navigator.userAgent}
                             <div style="color: ${changeColor}; font-size: 12px;">
                                 ${changeSymbol}${lastHourChange} in the past hour
                             </div>
-                            <div style="color: #6c757d; font-size: 10px;">
-                                Data points: ${historyCount} | Oldest: ${oldestEntry}
-                            </div>
                         </div>
                         <div style="text-align: right;">
                             <div style="color: #17a2b8; font-size: 12px;">
-                                Predicted next hour:
+                                Next hour prediction:
                             </div>
-                            <div style="color: #17a2b8; font-size: 14px; font-weight: bold;">
+                            <div style="color: #17a2b8; font-size: 16px; font-weight: bold;">
                                 ${predictedNextHour} players
+                            </div>
+                            <div style="color: ${predictionChangeColor}; font-size: 11px;">
+                                ${trendIcon} ${predictionChangeSymbol}${predictionChange} (${trendText})
                             </div>
                         </div>
                     </div>
+                    
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 5px; border-top: 1px solid rgba(255,255,255,0.1);">
+                        <div style="font-size: 10px;">
+                            <span style="color: #6c757d;">Confidence:</span>
+                            <span style="color: ${confidenceColor}; font-weight: bold;">${confidenceText} (${confidencePercent}%)</span>
+                        </div>
+                        <div style="font-size: 10px;">
+                            <span style="color: #6c757d;">Data Quality:</span>
+                            <span style="color: ${dataQualityColor}; font-weight: bold;">${dataQuality}</span>
+                        </div>
+                        ${this.historicalAccuracy ? `
+                            <div style="font-size: 10px;">
+                                <span style="color: #6c757d;">Accuracy:</span>
+                                <span style="color: #28a745; font-weight: bold;">${(this.historicalAccuracy * 100).toFixed(0)}%</span>
+                            </div>
+                        ` : ''}
+                        <div style="font-size: 10px; color: #6c757d;">
+                            ${historyCount} points
+                        </div>
+                    </div>
+                    
+                    ${this.serverEventDetected ? `
+                        <div style="background: rgba(220, 53, 69, 0.1); padding: 5px; border-radius: 3px; margin-top: 5px; border-left: 3px solid #dc3545;">
+                            <div style="color: #dc3545; font-size: 11px; font-weight: bold;">
+                                Server Event Detected
+                            </div>
+                            <div style="color: #6c757d; font-size: 10px;">
+                                Large population changes detected - predictions may be less accurate
+                            </div>
+                        </div>
+                    ` : historyCount < 10 ? `
+                        <div style="background: rgba(255, 193, 7, 0.1); padding: 5px; border-radius: 3px; margin-top: 5px; border-left: 3px solid #ffc107;">
+                            <div style="color: #ffc107; font-size: 11px; font-weight: bold;">
+                                Learning Mode: Collecting data for better predictions
+                            </div>
+                            <div style="color: #6c757d; font-size: 10px;">
+                                Predictions will improve as more data is collected over time
+                            </div>
+                        </div>
+                    ` : ''}
                 </div>
             `;
         }
@@ -2175,17 +2509,31 @@ User Agent: ${navigator.userAgent}
             
             const recentAlertsSection = document.getElementById('recent-alerts-section');
             const populationStats = document.getElementById('population-stats');
-            const playerSearchSection = populationStats ? populationStats.nextElementSibling : null;
+            const playerDatabaseSection = document.getElementById('player-database-section');
             
             if (!recentAlertsSection) return;
             
             // Check if Recent Alerts is currently at the top (right after population stats)
-            const currentlyAtTop = playerSearchSection && recentAlertsSection.nextElementSibling === playerSearchSection;
+            // We'll check by seeing if it comes before the player search section
+            const playerSearchSection = document.querySelector('[style*="Player Search"]')?.parentElement;
+            let currentlyAtTop = false;
+            
+            if (populationStats && recentAlertsSection) {
+                // Check if Recent Alerts comes right after population stats
+                let nextElement = populationStats.nextElementSibling;
+                while (nextElement && nextElement.style.display === 'none') {
+                    nextElement = nextElement.nextElementSibling;
+                }
+                currentlyAtTop = (nextElement === recentAlertsSection);
+            }
+            
+            console.log(`[Recent Alerts] hasUnacknowledgedAlerts: ${hasUnacknowledgedAlerts}, currentlyAtTop: ${currentlyAtTop}`);
             
             if (hasUnacknowledgedAlerts && !currentlyAtTop) {
-                // Move Recent Alerts to top (after population stats, before player search)
-                if (populationStats && playerSearchSection) {
+                // Move Recent Alerts to top (after population stats)
+                if (populationStats) {
                     populationStats.insertAdjacentElement('afterend', recentAlertsSection);
+                    console.log('Moved Recent Alerts to top due to unacknowledged alerts');
                 }
                 
                 // Make it more prominent with pulsing effect
@@ -2215,21 +2563,17 @@ User Agent: ${navigator.userAgent}
                     toggle.textContent = '▼';
                 }
                 
-                console.log('Moved Recent Alerts to top due to unacknowledged alerts');
-                
             } else if (!hasUnacknowledgedAlerts && currentlyAtTop) {
                 // Move Recent Alerts back to original position (after Player Database)
-                const playerDatabaseSection = document.getElementById('player-database-section');
                 if (playerDatabaseSection) {
                     playerDatabaseSection.insertAdjacentElement('afterend', recentAlertsSection);
+                    console.log('Moved Recent Alerts back to original position after Player Database');
                 }
                 
                 // Remove prominence styling
                 recentAlertsSection.style.border = '1px solid #dc3545';
                 recentAlertsSection.style.boxShadow = 'none';
                 recentAlertsSection.style.animation = 'none';
-                
-                console.log('Moved Recent Alerts back to original position');
             }
         }
 
@@ -2373,6 +2717,18 @@ User Agent: ${navigator.userAgent}
             // Clear any existing auto-refresh interval
             this.stopAutoRefresh();
             
+            // Initialize countdown
+            this.autoRefreshCountdown = 5 * 60; // 5 minutes in seconds
+            this.autoRefreshStartTime = Date.now();
+            
+            // Create countdown display
+            this.createAutoRefreshCountdown();
+            
+            // Update countdown every second
+            this.autoRefreshCountdownInterval = setInterval(() => {
+                this.updateAutoRefreshCountdown();
+            }, 1000);
+            
             // Set up auto-refresh every 5 minutes (300,000 milliseconds)
             this.autoRefreshInterval = setInterval(() => {
                 console.log('Auto-refresh: Refreshing page...');
@@ -2412,8 +2768,87 @@ User Agent: ${navigator.userAgent}
             if (this.autoRefreshInterval) {
                 clearInterval(this.autoRefreshInterval);
                 this.autoRefreshInterval = null;
-                console.log('Auto-refresh stopped');
-                debugConsole.info('Auto-refresh stopped');
+            }
+            if (this.autoRefreshCountdownInterval) {
+                clearInterval(this.autoRefreshCountdownInterval);
+                this.autoRefreshCountdownInterval = null;
+            }
+            
+            // Remove countdown display
+            const countdownElement = document.getElementById('auto-refresh-countdown');
+            if (countdownElement) {
+                countdownElement.remove();
+            }
+            
+            console.log('Auto-refresh stopped');
+            debugConsole.info('Auto-refresh stopped');
+        }
+
+        createAutoRefreshCountdown() {
+            // Remove existing countdown if any
+            const existingCountdown = document.getElementById('auto-refresh-countdown');
+            if (existingCountdown) {
+                existingCountdown.remove();
+            }
+
+            // Create countdown display
+            const countdownDiv = document.createElement('div');
+            countdownDiv.id = 'auto-refresh-countdown';
+            countdownDiv.style.cssText = `
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                background: rgba(0, 123, 255, 0.9);
+                color: white;
+                padding: 8px 12px;
+                border-radius: 5px;
+                font-size: 12px;
+                font-weight: bold;
+                z-index: 9999;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+                cursor: pointer;
+                user-select: none;
+            `;
+            countdownDiv.title = 'Click to cancel auto-refresh';
+            countdownDiv.onclick = () => {
+                if (confirm('Cancel auto-refresh?')) {
+                    this.stopAutoRefresh();
+                    // Update the checkbox
+                    const autoRefreshCheckbox = document.getElementById('auto-refresh');
+                    if (autoRefreshCheckbox) {
+                        autoRefreshCheckbox.checked = false;
+                    }
+                    // Update settings
+                    this.settings.autoRefresh = false;
+                    this.saveSettings();
+                }
+            };
+
+            document.body.appendChild(countdownDiv);
+        }
+
+        updateAutoRefreshCountdown() {
+            const countdownElement = document.getElementById('auto-refresh-countdown');
+            if (!countdownElement) return;
+
+            const elapsed = Math.floor((Date.now() - this.autoRefreshStartTime) / 1000);
+            const remaining = Math.max(0, this.autoRefreshCountdown - elapsed);
+
+            const minutes = Math.floor(remaining / 60);
+            const seconds = remaining % 60;
+
+            countdownElement.textContent = `Auto-refresh: ${minutes}:${seconds.toString().padStart(2, '0')}`;
+
+            // Change color when less than 30 seconds remaining
+            if (remaining <= 30 && remaining > 0) {
+                countdownElement.style.background = 'rgba(255, 193, 7, 0.9)';
+            } else if (remaining <= 10 && remaining > 0) {
+                countdownElement.style.background = 'rgba(220, 53, 69, 0.9)';
+            }
+
+            // Reset countdown when it reaches 0 (for next cycle)
+            if (remaining === 0) {
+                this.autoRefreshStartTime = Date.now();
             }
         }
     }
@@ -2666,7 +3101,7 @@ User Agent: ${navigator.userAgent}
                         <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
                             <input type="checkbox" id="auto-refresh" ${serverMonitor?.settings.autoRefresh ? 'checked' : ''} 
                                    onchange="toggleAutoRefresh(this.checked)" style="margin-right: 8px;">
-                            Auto-refresh page every 5 minutes
+                            Auto-refresh page every 5 minutes (with countdown)
                         </label>
                         <button onclick="testSound()" 
                                 style="background: #28a745; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-top: 5px;">
@@ -3225,21 +3660,9 @@ User Agent: ${navigator.userAgent}
         };
     };
 
-    window.clearDatabaseFilter = () => {
-        const filterSelect = document.getElementById('database-filter');
-        if (filterSelect) {
-            filterSelect.value = 'all';
-        }
-        if (serverMonitor) {
-            serverMonitor.updateDatabaseDisplay();
-        }
-    };
 
-    window.filterDatabase = (filterType) => {
-        if (serverMonitor) {
-            serverMonitor.updateDatabaseDisplay(filterType);
-        }
-    };
+
+
 
     window.toggleSoundAlerts = (enabled) => {
         if (serverMonitor) {
@@ -3347,42 +3770,13 @@ User Agent: ${navigator.userAgent}
         }
     };
 
-    window.removeSavedPlayer = (playerId) => {
-        if (serverMonitor) {
-            serverMonitor.removeSavedPlayer(playerId);
-            serverMonitor.updateSavedPlayersDisplay();
-        }
-    };
 
-    window.filterActivity = (filterType) => {
-        if (serverMonitor) {
-            serverMonitor.updateActivityDisplay(filterType);
-        }
-    };
 
-    window.clearActivityFilter = () => {
-        const filterSelect = document.getElementById('activity-filter');
-        if (filterSelect) {
-            filterSelect.value = 'all';
-        }
-        if (serverMonitor) {
-            serverMonitor.updateActivityDisplay();
-        }
-    };
 
-    window.toggleDebugMode = (enabled) => {
-        if (debugConsole) {
-            debugConsole.saveDebugSetting(enabled);
-            const debugSection = document.getElementById('debug-console-section');
-            if (debugSection) {
-                debugSection.style.display = enabled ? 'block' : 'none';
-            }
-            if (enabled) {
-                debugConsole.updateDebugDisplay();
-                refreshDebugStats();
-            }
-        }
-    };
+
+
+
+
 
     window.toggleAutoRefresh = (enabled) => {
         if (serverMonitor) {
@@ -3408,23 +3802,7 @@ User Agent: ${navigator.userAgent}
         }
     };
 
-    window.copyDebugLogs = () => {
-        if (debugConsole) {
-            const logsText = debugConsole.getLogsAsText();
-            navigator.clipboard.writeText(logsText).then(() => {
-                alert('Debug logs copied to clipboard');
-            }).catch(() => {
-                // Fallback for older browsers
-                const textArea = document.createElement('textarea');
-                textArea.value = logsText;
-                document.body.appendChild(textArea);
-                textArea.select();
-                document.execCommand('copy');
-                document.body.removeChild(textArea);
-                alert('Debug logs copied to clipboard');
-            });
-        }
-    };
+
 
     window.exportDebugLogs = () => {
         if (debugConsole) {
@@ -3512,182 +3890,15 @@ User Agent: ${navigator.userAgent}
         return matches;
     };
 
-    window.clearLog = () => {
-        if (serverMonitor && confirm('Are you sure you want to clear the activity log?')) {
-            serverMonitor.clearActivityLog();
-        }
-    };
 
-    window.resetCurrentServer = () => {
-        if (confirm('Are you sure you want to reset ALL data for THIS SERVER? This will clear:\n\n• All player alerts\n• Activity log\n• Settings\n• Saved players\n• Recent alerts\n• Player database\n• Population history\n\nThis action cannot be undone!')) {
-            // Clear all server-specific localStorage data
-            localStorage.removeItem(ALERTS_KEY);
-            localStorage.removeItem(ACTIVITY_LOG_KEY);
-            localStorage.removeItem(ALERT_SETTINGS_KEY);
-            localStorage.removeItem(SAVED_PLAYERS_KEY);
-            localStorage.removeItem(RECENT_ALERTS_KEY);
-            localStorage.removeItem(PLAYER_DATABASE_KEY);
-            localStorage.removeItem(POPULATION_HISTORY_KEY);
-            localStorage.removeItem(LAST_PLAYER_STATE_KEY);
-            
-            // Reset serverMonitor if it exists
-            if (serverMonitor) {
-                serverMonitor.alerts = {};
-                serverMonitor.activityLog = [];
-                serverMonitor.settings = {};
-                serverMonitor.savedPlayers = {};
-                serverMonitor.recentAlerts = {};
-                serverMonitor.playerDatabase = {};
-                serverMonitor.populationHistory = [];
-                serverMonitor.lastPlayerState = new Map();
-                serverMonitor.soundEnabled = true;
-                
-                // Update displays
-                serverMonitor.updatePlayerDisplay();
-                serverMonitor.updateActivityDisplay();
-                serverMonitor.updateAlertDisplay();
-                serverMonitor.updateSavedPlayersDisplay();
-                serverMonitor.updateRecentAlertsDisplay();
-                serverMonitor.updateDatabaseDisplay();
-                serverMonitor.updatePopulationDisplay();
-                serverMonitor.stopAlertReminders();
-                
-                // Reset sound checkboxes
-                const soundCheckbox = document.getElementById('sound-alerts');
-                const repeatCheckbox = document.getElementById('repeat-alerts');
-                if (soundCheckbox) {
-                    soundCheckbox.checked = true;
-                }
-                if (repeatCheckbox) {
-                    repeatCheckbox.checked = true;
-                }
-            }
-            
-            alert('Current server data has been reset successfully!');
-        }
-    };
 
-    window.resetAllData = () => {
-        if (confirm('⚠️ DANGER: Reset ALL data for ALL SERVERS?\n\nThis will permanently delete:\n• All server alerts and settings\n• All activity logs\n• All saved players\n• All player databases\n• All population history\n• UI preferences\n\nThis action cannot be undone!')) {
-            // Get all localStorage keys that start with 'bms_'
-            const keysToRemove = [];
-            for (let i = 0; i < localStorage.length; i++) {
-                const key = localStorage.key(i);
-                if (key && key.startsWith('bms_')) {
-                    keysToRemove.push(key);
-                }
-            }
-            
-            // Remove all BattleMetrics Monitor data
-            keysToRemove.forEach(key => localStorage.removeItem(key));
-            
-            // Reset current serverMonitor if it exists
-            if (serverMonitor) {
-                serverMonitor.alerts = {};
-                serverMonitor.activityLog = [];
-                serverMonitor.settings = {};
-                serverMonitor.savedPlayers = {};
-                serverMonitor.recentAlerts = {};
-                serverMonitor.playerDatabase = {};
-                serverMonitor.populationHistory = [];
-                serverMonitor.lastPlayerState = new Map();
-                serverMonitor.soundEnabled = true;
-                
-                // Update displays
-                serverMonitor.updatePlayerDisplay();
-                serverMonitor.updateActivityDisplay();
-                serverMonitor.updateAlertDisplay();
-                serverMonitor.updateSavedPlayersDisplay();
-                serverMonitor.updateRecentAlertsDisplay();
-                serverMonitor.updateDatabaseDisplay();
-                serverMonitor.updatePopulationDisplay();
-                serverMonitor.stopAlertReminders();
-            }
-            
-            alert('All data for all servers has been permanently deleted!');
-            
-            // Reload page to ensure clean state
-            setTimeout(() => location.reload(), 1000);
-        }
-    };
 
-    window.exportCurrentServer = () => {
-        if (!serverMonitor) {
-            alert('No server monitor data available to export.');
-            return;
-        }
-        
-        const exportData = {
-            serverID: currentServerID,
-            serverName: currentServerName,
-            exportDate: new Date().toISOString(),
-            alerts: serverMonitor.alerts,
-            activityLog: serverMonitor.activityLog,
-            settings: serverMonitor.settings,
-            savedPlayers: serverMonitor.savedPlayers,
-            recentAlerts: serverMonitor.recentAlerts,
-            playerDatabase: serverMonitor.playerDatabase,
-            populationHistory: serverMonitor.populationHistory
-        };
-        
-        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `battlemetrics_monitor_server_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        
-        alert('Current server data exported successfully!');
-    };
 
-    window.exportAllServers = () => {
-        const allData = {};
-        let hasData = false;
-        
-        // Collect all BattleMetrics Monitor data from localStorage
-        for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key && key.startsWith('bms_')) {
-                try {
-                    const value = localStorage.getItem(key);
-                    allData[key] = JSON.parse(value);
-                    hasData = true;
-                } catch (e) {
-                    // If parsing fails, store as string
-                    allData[key] = localStorage.getItem(key);
-                    hasData = true;
-                }
-            }
-        }
-        
-        if (!hasData) {
-            alert('No BattleMetrics Monitor data found to export.');
-            return;
-        }
-        
-        const exportData = {
-            exportDate: new Date().toISOString(),
-            exportType: 'all_servers',
-            currentServerID: currentServerID,
-            data: allData
-        };
-        
-        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `battlemetrics_monitor_all_data_${new Date().toISOString().split('T')[0]}.json`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        
-        const serverCount = Object.keys(allData).filter(key => key.includes('_player_alerts_')).length;
-        alert(`All data exported successfully!\nIncluded data from ${serverCount} servers.`);
-    };
+
+
+
+
+
 
     window.removeSavedPlayer = (playerId) => {
         if (serverMonitor) {
@@ -3843,12 +4054,7 @@ User Agent: ${navigator.userAgent}
         }
     };
 
-    window.testSound = () => {
-        if (serverMonitor) {
-            console.log('Testing alert sound...');
-            serverMonitor.playAlertSound();
-        }
-    };
+
 
     // Debug Console Functions
     window.toggleDebugMode = (enabled) => {
@@ -3876,14 +4082,7 @@ User Agent: ${navigator.userAgent}
         }
     };
 
-    window.exportDebugLogs = () => {
-        debugConsole.exportLogs();
-    };
 
-    window.clearDebugLogs = () => {
-        debugConsole.clearLogs();
-        refreshDebugStats();
-    };
 
     window.copyDebugLogs = () => {
         if (!debugConsole) {
@@ -3927,30 +4126,7 @@ User Agent: ${navigator.userAgent}
 
 
 
-    // Test function for debug console
-    window.testDebugConsole = () => {
-        console.log('[Debug Console] testDebugConsole called');
-        if (!debugConsole) {
-            alert('Debug console not initialized!');
-            return;
-        }
-        
-        console.log('[Debug Console] Adding test messages...');
-        debugConsole.debug('Test debug message from user');
-        debugConsole.info('Test info message from user');
-        debugConsole.warn('Test warning message from user');
-        debugConsole.error('Test error message from user');
-        
-        console.log('[Debug Console] Current logs after test:', debugConsole.logs.length);
-        
-        // Force refresh
-        setTimeout(() => {
-            console.log('[Debug Console] Forcing refresh...');
-            refreshDebugStats();
-        }, 100);
-        
-        console.log('Test messages added to debug console. Check the debug console section.');
-    };
+
 
     // Global function to check debug console status
     window.checkDebugConsole = () => {
