@@ -339,6 +339,7 @@ User Agent: ${navigator.userAgent}
                 this.isMonitoring = false;
                 this.currentPlayers = new Map();
                 this.soundEnabled = this.settings.soundEnabled !== false;
+                this.autoRefreshInterval = null;
                 
                 // Initialize other properties
                 this.activityLog = [];
@@ -1025,11 +1026,15 @@ User Agent: ${navigator.userAgent}
             const now = Date.now();
             let needsUpdate = false;
             
+            console.log(`[Database] Adding player to database: ${playerName} (ID: ${playerId})`);
+            
             if (this.playerDatabase[playerId]) {
                 // Player exists, check for name change
                 const existing = this.playerDatabase[playerId];
+                console.log(`[Database] Player exists in database, updating last seen`);
                 if (existing.currentName !== playerName) {
                     // Name changed
+                    console.log(`[Database] Name change detected: ${existing.currentName} -> ${playerName}`);
                     existing.previousNames = existing.previousNames || [];
                     if (!existing.previousNames.includes(existing.currentName)) {
                         existing.previousNames.push(existing.currentName);
@@ -1040,8 +1045,10 @@ User Agent: ${navigator.userAgent}
                     needsUpdate = true;
                 }
                 existing.lastSeen = now;
+                needsUpdate = true; // Always update lastSeen
             } else {
                 // New player
+                console.log(`[Database] New player added to database: ${playerName}`);
                 this.playerDatabase[playerId] = {
                     id: playerId,
                     currentName: playerName,
@@ -1054,8 +1061,9 @@ User Agent: ${navigator.userAgent}
                 needsUpdate = true;
             }
             
-            // Only save and update display if there were significant changes
+            // Always save when a player is added/updated
             if (needsUpdate) {
+                console.log(`[Database] Saving database with ${Object.keys(this.playerDatabase).length} players`);
                 this.savePlayerDatabase();
                 
                 // Skip display updates during batch operations (initial load)
@@ -1224,7 +1232,7 @@ User Agent: ${navigator.userAgent}
             // For longer queries, we can be more restrictive
             const maxSearchCount = query.length <= 3 ? 2000 : 3000;
             
-            console.log(`Searching database for "${query}" (max ${maxSearchCount} entries, max ${maxResults} results)`);
+            console.log(`[Database Search] Searching database for "${query}" in ${Object.keys(this.playerDatabase).length} total players (max ${maxSearchCount} entries, max ${maxResults} results)`);
             
             // Use for...of loop for better performance
             for (const player of Object.values(this.playerDatabase)) {
@@ -1296,7 +1304,14 @@ User Agent: ${navigator.userAgent}
             // Combine results: exact matches first, then partial matches
             const combinedResults = [...exactMatches, ...partialMatches].slice(0, maxResults);
             
-            console.log(`Search results for "${query}": ${exactMatches.length} exact matches, ${partialMatches.length} partial matches, ${combinedResults.length} total returned`);
+            console.log(`[Database Search] Search results for "${query}": ${exactMatches.length} exact matches, ${partialMatches.length} partial matches, ${combinedResults.length} total returned`);
+            
+            // Debug: Show first few results
+            if (combinedResults.length > 0) {
+                console.log(`[Database Search] First few results:`, combinedResults.slice(0, 3).map(p => `${p.currentName} (${p.id})`));
+            } else {
+                console.log(`[Database Search] No results found for "${query}"`);
+            }
             
             return combinedResults;
         }
@@ -1406,6 +1421,10 @@ User Agent: ${navigator.userAgent}
             };
             this.activityLog.push(entry);
             this.saveActivityLog();
+
+            // IMPORTANT: Add player to database when they join OR leave
+            // This ensures players who leave are still searchable in the database
+            this.addToDatabase(playerId, playerName);
 
             // Check if we should alert for this player
             const alert = this.alerts[playerId];
@@ -2349,6 +2368,54 @@ User Agent: ${navigator.userAgent}
             
             alert('All server data has been reset.');
         }
+
+        startAutoRefresh() {
+            // Clear any existing auto-refresh interval
+            this.stopAutoRefresh();
+            
+            // Set up auto-refresh every 5 minutes (300,000 milliseconds)
+            this.autoRefreshInterval = setInterval(() => {
+                console.log('Auto-refresh: Refreshing page...');
+                debugConsole.info('Auto-refresh triggered - refreshing page');
+                
+                // Show a brief notification before refresh
+                const notification = document.createElement('div');
+                notification.style.cssText = `
+                    position: fixed;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    background: rgba(0, 123, 255, 0.9);
+                    color: white;
+                    padding: 15px 25px;
+                    border-radius: 8px;
+                    z-index: 10002;
+                    font-size: 14px;
+                    font-weight: bold;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                `;
+                notification.textContent = 'Auto-refreshing page...';
+                document.body.appendChild(notification);
+                
+                // Refresh after a short delay
+                setTimeout(() => {
+                    window.location.reload();
+                }, 1000);
+                
+            }, 5 * 60 * 1000); // 5 minutes
+            
+            console.log('Auto-refresh started: page will refresh every 5 minutes');
+            debugConsole.info('Auto-refresh started - 5 minute interval');
+        }
+
+        stopAutoRefresh() {
+            if (this.autoRefreshInterval) {
+                clearInterval(this.autoRefreshInterval);
+                this.autoRefreshInterval = null;
+                console.log('Auto-refresh stopped');
+                debugConsole.info('Auto-refresh stopped');
+            }
+        }
     }
 
     // Add global click handler for better Firefox compatibility
@@ -2596,6 +2663,11 @@ User Agent: ${navigator.userAgent}
                                    onchange="toggleDebugMode(this.checked)" style="margin-right: 8px;">
                             Enable debug console mode
                         </label>
+                        <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
+                            <input type="checkbox" id="auto-refresh" ${serverMonitor?.settings.autoRefresh ? 'checked' : ''} 
+                                   onchange="toggleAutoRefresh(this.checked)" style="margin-right: 8px;">
+                            Auto-refresh page every 5 minutes
+                        </label>
                         <button onclick="testSound()" 
                                 style="background: #28a745; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-top: 5px;">
                             Test Sound
@@ -2693,6 +2765,12 @@ User Agent: ${navigator.userAgent}
                 
                 if (debugCheckbox) {
                     debugCheckbox.checked = debugConsole.enabled;
+                }
+                
+                // Initialize auto-refresh checkbox
+                const autoRefreshCheckbox = document.getElementById('auto-refresh');
+                if (autoRefreshCheckbox && serverMonitor) {
+                    autoRefreshCheckbox.checked = serverMonitor.settings.autoRefresh || false;
                 }
                 
                 // Always try to refresh display
@@ -3306,6 +3384,21 @@ User Agent: ${navigator.userAgent}
         }
     };
 
+    window.toggleAutoRefresh = (enabled) => {
+        if (serverMonitor) {
+            serverMonitor.settings.autoRefresh = enabled;
+            serverMonitor.saveSettings();
+            
+            if (enabled) {
+                serverMonitor.startAutoRefresh();
+                console.log('Auto-refresh enabled: page will refresh every 5 minutes');
+            } else {
+                serverMonitor.stopAutoRefresh();
+                console.log('Auto-refresh disabled');
+            }
+        }
+    };
+
     window.testDebugConsole = () => {
         if (debugConsole) {
             debugConsole.info('Debug console test message');
@@ -3360,6 +3453,63 @@ User Agent: ${navigator.userAgent}
                 `;
             }
         }
+    };
+
+    // Debug function to check if a player is in the database
+    window.checkPlayerInDatabase = (playerName) => {
+        if (!serverMonitor) {
+            console.log('❌ ServerMonitor not initialized');
+            return;
+        }
+        
+        console.log(`🔍 Checking database for player: "${playerName}"`);
+        console.log(`📊 Total players in database: ${Object.keys(serverMonitor.playerDatabase).length}`);
+        
+        const lowerName = playerName.toLowerCase();
+        const matches = [];
+        
+        for (const [playerId, player] of Object.entries(serverMonitor.playerDatabase)) {
+            if (player.currentName && player.currentName.toLowerCase().includes(lowerName)) {
+                matches.push({
+                    id: playerId,
+                    currentName: player.currentName,
+                    originalName: player.originalName,
+                    lastSeen: new Date(player.lastSeen).toLocaleString(),
+                    firstSeen: new Date(player.firstSeen).toLocaleString(),
+                    previousNames: player.previousNames || []
+                });
+            }
+        }
+        
+        if (matches.length > 0) {
+            console.log(`✅ Found ${matches.length} matches:`);
+            matches.forEach((match, index) => {
+                console.log(`  ${index + 1}. ${match.currentName} (ID: ${match.id})`);
+                console.log(`     Original: ${match.originalName}`);
+                console.log(`     Last seen: ${match.lastSeen}`);
+                console.log(`     First seen: ${match.firstSeen}`);
+                if (match.previousNames.length > 0) {
+                    console.log(`     Previous names: ${match.previousNames.join(', ')}`);
+                }
+                console.log('     ---');
+            });
+        } else {
+            console.log(`❌ No matches found for "${playerName}"`);
+            
+            // Show some recent players for reference
+            const recentPlayers = Object.values(serverMonitor.playerDatabase)
+                .sort((a, b) => b.lastSeen - a.lastSeen)
+                .slice(0, 5);
+            
+            if (recentPlayers.length > 0) {
+                console.log('📋 Most recent players in database:');
+                recentPlayers.forEach((player, index) => {
+                    console.log(`  ${index + 1}. ${player.currentName} (${new Date(player.lastSeen).toLocaleString()})`);
+                });
+            }
+        }
+        
+        return matches;
     };
 
     window.clearLog = () => {
@@ -3930,6 +4080,7 @@ User Agent: ${navigator.userAgent}
         if (serverMonitor) {
             serverMonitor.stopMonitoring();
             serverMonitor.stopAlertReminders();
+            serverMonitor.stopAutoRefresh();
         }
         
         // Clear intervals
@@ -4234,6 +4385,11 @@ User Agent: ${navigator.userAgent}
                 const unacknowledged = Object.values(serverMonitor.recentAlerts).filter(alert => !alert.acknowledged);
                 if (unacknowledged.length > 0) {
                     serverMonitor.startAlertReminders();
+                }
+                
+                // Start auto-refresh if enabled
+                if (serverMonitor.settings.autoRefresh) {
+                    serverMonitor.startAutoRefresh();
                 }
                 
                 console.log('Server monitor initialized successfully');
