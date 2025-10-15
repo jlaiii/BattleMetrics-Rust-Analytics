@@ -4354,6 +4354,9 @@ User Agent: ${navigator.userAgent}
                 cleaned = cleaned.replace(/\{[^}]*\}/g, '');
                 cleaned = cleaned.replace(/\.css-[a-zA-Z0-9-]+/g, '');
                 
+                // Remove CSS selectors and pseudo-classes (this is the main fix)
+                cleaned = cleaned.replace(/:hover|:focus|:active|\.focus|\.active|\.disabled|\[disabled\]|fieldset\[disabled\]/gi, '');
+                
                 // Remove common CSS properties and values
                 cleaned = cleaned.replace(/(display|margin|padding|font|color|background|border|width|height|position|top|left|right|bottom):[^;]*;?/gi, '');
                 
@@ -4363,14 +4366,22 @@ User Agent: ${navigator.userAgent}
                 // Remove "Server Monitor" text if it appears at the start
                 cleaned = cleaned.replace(/^Server\s+Monitor/i, '');
                 
-                // Remove Server ID pattern
-                cleaned = cleaned.replace(/Server\s+ID:\s*\d+/gi, '');
+                // Remove Server ID pattern and any trailing CSS-like content
+                cleaned = cleaned.replace(/Server\s+ID:\s*\d+.*$/gi, '');
+                
+                // Remove any text that contains CSS pseudo-selectors or looks like CSS
+                cleaned = cleaned.replace(/[^a-zA-Z0-9\s\-\.\[\]]+/g, ' ');
                 
                 // Clean up whitespace and special characters
                 cleaned = cleaned.replace(/\s+/g, ' ').trim();
                 
                 // Remove any remaining non-printable characters
                 cleaned = cleaned.replace(/[^\x20-\x7E]/g, '');
+                
+                // If the result still contains CSS-like patterns, return empty
+                if (cleaned.match(/(:hover|:focus|:active|\.css-|fieldset)/i)) {
+                    return '';
+                }
                 
                 return cleaned;
             };
@@ -4410,6 +4421,14 @@ User Agent: ${navigator.userAgent}
                 serverNameElement = document.querySelector(selector);
                 if (serverNameElement) {
                     rawText = serverNameElement.textContent || serverNameElement.innerText || '';
+                    
+                    // Skip if the raw text contains obvious CSS selectors or pseudo-classes
+                    if (rawText.includes(':hover') || rawText.includes(':focus') || rawText.includes(':active') || 
+                        rawText.includes('fieldset') || rawText.includes('.css-') || rawText.includes('{') || rawText.includes('}')) {
+                        debugConsole.debug('Skipping selector "' + selector + '" - contains CSS content');
+                        continue;
+                    }
+                    
                     const cleanedName = cleanServerName(rawText);
                     
                     // Only accept if we have a reasonable server name (not empty, not just CSS)
@@ -4434,7 +4453,11 @@ User Agent: ${navigator.userAgent}
                         // Update UI immediately
                         const serverNameSpan = document.getElementById('current-server-name');
                         if (serverNameSpan) {
-                            serverNameSpan.textContent = currentServerName;
+                            // Additional safety check to prevent CSS content from being displayed
+                            const safeName = currentServerName && !currentServerName.includes(':hover') && 
+                                           !currentServerName.includes(':focus') && !currentServerName.includes(':active') && 
+                                           !currentServerName.includes('fieldset') ? currentServerName : `Server ${currentServerID}`;
+                            serverNameSpan.textContent = safeName;
                         }
                         return;
                     }
@@ -4447,7 +4470,11 @@ User Agent: ${navigator.userAgent}
             // Update UI with the found server name
             const serverNameSpan = document.getElementById('current-server-name');
             if (serverNameSpan) {
-                serverNameSpan.textContent = currentServerName;
+                // Additional safety check to prevent CSS content from being displayed
+                const safeName = currentServerName && !currentServerName.includes(':hover') && 
+                               !currentServerName.includes(':focus') && !currentServerName.includes(':active') && 
+                               !currentServerName.includes('fieldset') ? currentServerName : `Server ${currentServerID}`;
+                serverNameSpan.textContent = safeName;
             }
         };
         
@@ -4503,7 +4530,11 @@ User Agent: ${navigator.userAgent}
             
             const serverNameSpan = document.getElementById('current-server-name');
             if (serverNameSpan) {
-                serverNameSpan.textContent = currentServerName || 'Loading...';
+                // Additional safety check to prevent CSS content from being displayed
+                const safeName = currentServerName && !currentServerName.includes(':hover') && 
+                               !currentServerName.includes(':focus') && !currentServerName.includes(':active') && 
+                               !currentServerName.includes('fieldset') ? currentServerName : 'Loading...';
+                serverNameSpan.textContent = safeName;
             }
         }, 500);
         
