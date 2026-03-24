@@ -12,6 +12,13 @@
 (function () {
     'use strict';
 
+    // Script version constant used for update checks and displays
+    const SCRIPT_VERSION = '1.0.1';
+    // GitHub raw URL for the userscript (Tampermonkey will detect and offer install)
+    const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMplayer.user.js';
+    const INSTALL_URL = GITHUB_RAW_URL;
+    let updateAvailable = false;
+    let updateAvailableVersion = null;
     const INFO_BOX_ID = 'bmt-info-box';
     const BUTTON_ID = 'bmt-hour-button';
     const TOGGLE_BUTTON_ID = 'bmt-toggle-button';
@@ -25,17 +32,35 @@
     let allTopServers = [];
     let autoPullEnabled = true;
     let debugConsoleEnabled = false;
+    let hideMiniOnLoad = false; // when true, menu starts hidden and only toggle is shown
+    let showServerFirstSeen = false;
     let autoPullInterval = null;
+    let checkForUpdates = true; // when true, script will check GitHub for newer versions
     
+    let topServersCount = 10; // how many top servers to show/copy by default
+    let showCopyAllDetailed = false; // whether to show the "Copy All Servers (detailed)" button
+    let autoCaptureErrors = true; // automatically capture JS errors/unhandled rejections into debug logs
     // Settings management
     const loadSettings = () => {
         try {
             const settings = JSON.parse(localStorage.getItem('bma_settings') || '{}');
             autoPullEnabled = settings.autoPullEnabled !== false; // Default to true
             debugConsoleEnabled = settings.debugConsoleEnabled === true; // Default to false
+            showServerFirstSeen = settings.showServerFirstSeen === true; // Default to false
+            hideMiniOnLoad = settings.hideMiniOnLoad === true; // Default to false (show menu)
+            checkForUpdates = settings.checkForUpdates !== false; // Default to true
+            topServersCount = Number(settings.topServersCount) || 10;
+            showCopyAllDetailed = settings.showCopyAllDetailed === true;
+            autoCaptureErrors = settings.autoCaptureErrors !== false;
         } catch (e) {
             autoPullEnabled = true;
             debugConsoleEnabled = false;
+            showServerFirstSeen = false;
+            hideMiniOnLoad = false;
+            checkForUpdates = true;
+            topServersCount = 10;
+            showCopyAllDetailed = false;
+            autoCaptureErrors = true;
         }
     };
 
@@ -43,6 +68,12 @@
         const settings = {
             autoPullEnabled,
             debugConsoleEnabled
+            ,showServerFirstSeen,
+            hideMiniOnLoad
+            ,checkForUpdates
+            ,topServersCount
+            ,showCopyAllDetailed
+            ,autoCaptureErrors
         };
         localStorage.setItem('bma_settings', JSON.stringify(settings));
     };
@@ -56,7 +87,7 @@
             this.logs = [];
             this.enabled = debugConsoleEnabled;
             this.maxLogs = 1000;
-            this.version = '1.0.1';
+            this.version = SCRIPT_VERSION;
         }
 
         saveDebugSetting(enabled) {
@@ -71,7 +102,14 @@
                 timestamp,
                 level,
                 message,
-                data: data ? JSON.stringify(data, null, 2) : null,
+                data: (function() {
+                    if (data === null || data === undefined) return null;
+                    try {
+                        return JSON.stringify(data, null, 2);
+                    } catch (e) {
+                        try { return String(data); } catch (e2) { return '[unserializable]'; }
+                    }
+                })(),
                 url: window.location.href,
                 userAgent: navigator.userAgent
             };
@@ -245,6 +283,44 @@ User Agent: ${navigator.userAgent}
     // Initialize debug console
     const debugConsole = new DebugConsole();
 
+    // Error capture handlers (attach/detach so user can toggle)
+    let _bma_onerror = null;
+    let _bma_unhandled = null;
+
+    const attachErrorHandlers = () => {
+        if (_bma_onerror) return; // already attached
+        _bma_onerror = (event) => {
+            try {
+                const err = event.error || event.message || event;
+                debugConsole.error('Uncaught error', err && err.stack ? err.stack : err);
+            } catch (e) {
+                // swallow
+            }
+        };
+        _bma_unhandled = (ev) => {
+            try {
+                debugConsole.error('Unhandled promise rejection', ev.reason || ev);
+            } catch (e) {
+                // swallow
+            }
+        };
+        window.addEventListener('error', _bma_onerror);
+        window.addEventListener('unhandledrejection', _bma_unhandled);
+    };
+
+    const detachErrorHandlers = () => {
+        if (_bma_onerror) {
+            window.removeEventListener('error', _bma_onerror);
+            _bma_onerror = null;
+        }
+        if (_bma_unhandled) {
+            window.removeEventListener('unhandledrejection', _bma_unhandled);
+            _bma_unhandled = null;
+        }
+    };
+
+    if (autoCaptureErrors) attachErrorHandlers();
+
     // Enhanced debug logging for playerinfo script
     const debugLog = (level, message, data = null) => {
         debugConsole.log(level, message, data);
@@ -330,7 +406,7 @@ User Agent: ${navigator.userAgent}
     };
 
     // Log script startup
-    debugLog('info', 'BattleMetrics Rust Analytics v1.0.1 loaded', {
+    debugLog('info', `BattleMetrics Rust Analytics v${SCRIPT_VERSION} loaded`, {
         url: window.location.href,
         userAgent: navigator.userAgent,
         autoPullEnabled,
@@ -339,6 +415,94 @@ User Agent: ${navigator.userAgent}
     
     // Debug console system initialized
     debugLog('debug', 'Debug console system initialized');
+
+    // --- Update check utilities ---
+    const compareVersions = (a, b) => {
+        try {
+            const normalize = (v) => {
+                if (!v) return '';
+                // Strip leading 'v' and capture numeric version prefix (e.g. v1.2.3-beta -> 1.2.3)
+                const m = String(v).trim().match(/^v?(\d+(?:\.\d+)*)/i);
+                return m ? m[1] : '';
+            };
+
+            const naStr = normalize(a);
+            const nbStr = normalize(b);
+            const pa = naStr.split('.').map(n => parseInt(n, 10) || 0);
+            const pb = nbStr.split('.').map(n => parseInt(n, 10) || 0);
+            for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+                const na = pa[i] || 0;
+                const nb = pb[i] || 0;
+                if (na > nb) return 1;
+                if (na < nb) return -1;
+            }
+            return 0;
+        } catch (e) {
+            return 0;
+        }
+    };
+
+    const updateUpdateBannerDisplay = () => {
+        const infoBox = document.getElementById(INFO_BOX_ID);
+        const existing = document.getElementById('update-available-banner');
+        if (!updateAvailable) {
+            if (existing) existing.remove();
+            return;
+        }
+
+        const bannerHTML = `<div id="update-available-banner" style="background: #ffc107; color: #000; padding:8px; border-radius:5px; margin-bottom:10px; cursor:pointer; font-weight:700; text-align:center;">Update available v${updateAvailableVersion} — Click to install</div>`;
+
+        if (infoBox) {
+            if (existing) {
+                existing.outerHTML = bannerHTML;
+            } else {
+                infoBox.insertAdjacentHTML('afterbegin', bannerHTML);
+            }
+            // Ensure the banner element always has a click handler (use onclick to avoid duplicate listeners)
+            const el = document.getElementById('update-available-banner');
+            if (el) el.onclick = () => window.openInstall();
+            // Also update the toggle button indicator so it's visible even when menu is closed
+            updateToggleButton();
+        }
+    };
+
+    const checkForUpdatesAvailable = async () => {
+        if (!checkForUpdates) return;
+        try {
+            const resp = await fetch(GITHUB_RAW_URL, {cache: 'no-cache'});
+            if (!resp || !resp.ok) return;
+            const text = await resp.text();
+            const m = text.match(/@version\s+([^\s\n\r]+)/i) || text.match(/const\s+SCRIPT_VERSION\s*=\s*['\"]([^'\"]+)['\"]/i);
+            if (m && m[1]) {
+                const remoteVer = m[1].trim();
+                if (compareVersions(remoteVer, SCRIPT_VERSION) === 1) {
+                    updateAvailable = true;
+                    updateAvailableVersion = remoteVer;
+                    debugLog('info', `Update available v${remoteVer}`);
+                } else {
+                    updateAvailable = false;
+                    updateAvailableVersion = null;
+                }
+                updateUpdateBannerDisplay();
+            }
+        } catch (e) {
+            debugLog('warn', 'Update check failed', e);
+        }
+    };
+
+    window.openInstall = () => {
+        try {
+            window.open(INSTALL_URL, '_blank');
+        } catch (e) {
+            debugLog('error', 'Failed to open install URL', e);
+        }
+    };
+
+    // Run an initial update check if allowed, then periodically every 6 hours
+    if (checkForUpdates) {
+        setTimeout(() => { checkForUpdatesAvailable(); }, 1000);
+        setInterval(() => { checkForUpdatesAvailable(); }, 6 * 60 * 60 * 1000);
+    }
 
     const removeResults = () => {
         const infoBox = document.getElementById(INFO_BOX_ID);
@@ -376,8 +540,12 @@ User Agent: ${navigator.userAgent}
         const toggleBtn = document.getElementById(TOGGLE_BUTTON_ID);
         if (toggleBtn) {
             const visible = isMenuVisible();
-            toggleBtn.textContent = visible ? '✕' : '☰';
+            // Show main icon and, when an update is available, a small red dot indicator
+            const base = visible ? '✕' : '☰';
+            const indicator = (updateAvailable ? '<span style="color:#ff4d4f; margin-left:6px; font-weight:700;">•</span>' : '');
+            toggleBtn.innerHTML = base + indicator;
             toggleBtn.title = visible ? 'Hide Rust Analytics Menu' : 'Show Rust Analytics Menu';
+            if (updateAvailable) toggleBtn.title += ` — Update available v${updateAvailableVersion}`;
         }
     };
 
@@ -434,6 +602,12 @@ User Agent: ${navigator.userAgent}
                 </div>
             </div>
         `;
+
+        // If an update is available, add a prominent banner at the top of the menu
+        if (updateAvailable && updateAvailableVersion) {
+            const banner = `<div id="update-available-banner" style="background: #ffc107; color: #000; padding:8px; border-radius:5px; margin-bottom:10px; cursor:pointer; font-weight:700; text-align:center;">Update available v${updateAvailableVersion} — Click to install</div>`;
+            content = banner + content;
+        }
 
         if (isError) {
             content += `
@@ -525,6 +699,9 @@ User Agent: ${navigator.userAgent}
                     <button onclick="copyPlayerInfo()" style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; font-size: 12px;">
                         Copy Player Info
                     </button>
+                    <button id="copy-all-detailed-btn" onclick="copyAllServersDetailed()" style="${showCopyAllDetailed ? '' : 'display:none;'} background: #17a2b8; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; font-size: 12px; margin-left:8px;">
+                        Copy All Servers (detailed)
+                    </button>
                 </div>
                 
                 <!-- Settings Section -->
@@ -550,6 +727,73 @@ User Agent: ${navigator.userAgent}
                             <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 2px;">
                                 Show debug console with detailed logging
                             </div>
+                            <div style="margin-top:8px;">
+                                <label style="display: flex; align-items: center; cursor: pointer; font-size: 12px;">
+                                    <input type="checkbox" id="hide-mini-toggle" ${hideMiniOnLoad ? 'checked' : ''} style="margin-right: 8px;">
+                                    Start minimized (show only ☰ toggle)
+                                </label>
+                                <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 2px;">
+                                    When enabled the main menu will be hidden on page load; click the three-line toggle to show it.
+                                </div>
+                            </div>
+                        <div style="margin-top:8px;">
+                            <label style="display: flex; align-items: center; cursor: pointer; font-size: 12px;">
+                                <input type="checkbox" id="show-server-firstseen-toggle" ${showServerFirstSeen ? 'checked' : ''} style="margin-right: 8px;">
+                                Show per-server "first seen" in Top/Recently lists
+                            </label>
+                            <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 2px;">
+                                When enabled, server entries will display when this player was first seen on that server.
+                            </div>
+                        </div>
+                        <div style="margin-top:8px;">
+                            <label style="display: flex; align-items: center; cursor: pointer; font-size: 12px;">
+                                <input type="checkbox" id="check-updates-toggle" ${checkForUpdates ? 'checked' : ''} style="margin-right: 8px;">
+                                Check for updates (show banner when newer version available)
+                            </label>
+                            <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 2px;">
+                                When enabled, the script will check GitHub for a newer release and show an update banner in the menu.
+                            </div>
+                        </div>
+                        <div style="margin-top:8px;">
+                            <label style="display:flex; align-items:center; font-size:12px;">
+                                <span style="margin-right:8px;">Top servers to show:</span>
+                                <select id="top-servers-count-select" style="font-size:12px;">
+                                    <option value="5" ${topServersCount===5? 'selected' : ''}>5</option>
+                                    <option value="10" ${topServersCount===10? 'selected' : ''}>10</option>
+                                    <option value="25" ${topServersCount===25? 'selected' : ''}>25</option>
+                                    <option value="50" ${topServersCount===50? 'selected' : ''}>50</option>
+                                </select>
+                            </label>
+                            <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 6px;">
+                                Controls how many Top servers are shown/copied by the script.
+                            </div>
+                        </div>
+                        <div style="margin-top:8px;">
+                            <label style="display:flex; align-items:center; font-size:12px;">
+                                <input type="checkbox" id="show-copyall-toggle" ${showCopyAllDetailed ? 'checked' : ''} style="margin-right:8px;">
+                                Show 'Copy All Servers (detailed)' button
+                            </label>
+                            <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 6px;">
+                                When enabled, the JSON export button will be visible in the menu for copying all servers.
+                            </div>
+                        </div>
+                        <div style="margin-top:8px;">
+                            <label style="display:flex; align-items:center; font-size:12px;">
+                                <input type="checkbox" id="auto-capture-errors-toggle" ${autoCaptureErrors ? 'checked' : ''} style="margin-right:8px;">
+                                Automatically capture JS errors
+                            </label>
+                            <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 6px;">
+                                When enabled, uncaught errors and unhandled promise rejections will be logged to the debug console.
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+                            <button id="check-updates-now-btn" style="background: #17a2b8; color: white; border: none; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">Check for updates now</button>
+                            <button id="reset-settings-btn" style="background: #dc3545; color: white; border: none; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">Reset to defaults</button>
+                        </div>
+                        <div style="margin-top:8px;">
+                            <a id="bma-github-link" href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" rel="noopener" style="color:#1a0dab; text-decoration:underline; display:inline-block; margin-right:12px;">GitHub</a>
+                            <a id="bma-discord-link" href="https://discord.gg/bEPn9UH9Xw" target="_blank" rel="noopener" style="color:#1a0dab; text-decoration:underline; display:inline-block;">Discord</a>
+                        </div>
                         </div>
                     </div>
                 </div>
@@ -586,7 +830,7 @@ User Agent: ${navigator.userAgent}
                 <!-- Version Info -->
                 <div style="text-align: center; padding: 10px; border-top: 1px solid rgba(255,255,255,0.2); margin-top: 15px;">
                     <div style="font-size: 11px; color: #6c757d; opacity: 0.8;">
-                        BattleMetrics Rust Analytics v1.0.1
+                        BattleMetrics Rust Analytics v${SCRIPT_VERSION}
                     </div>
                 </div>
             `;
@@ -613,6 +857,16 @@ User Agent: ${navigator.userAgent}
         });
 
         document.body.appendChild(infoBox);
+
+        // Ensure copy-all button visibility matches setting (covers any rendering differences)
+        const copyAllBtn = document.getElementById('copy-all-detailed-btn');
+        if (copyAllBtn) copyAllBtn.style.display = showCopyAllDetailed ? 'inline-block' : 'none';
+
+        // Attach click handler to update banner if it was added in the HTML
+        const bannerEl = document.getElementById('update-available-banner');
+        if (bannerEl) {
+            bannerEl.addEventListener('click', () => window.openInstall());
+        }
 
         // Apply current visibility state
         updateButtonsVisibility();
@@ -656,15 +910,16 @@ User Agent: ${navigator.userAgent}
 
             if (!serversContent || allTopServers.length === 0) return;
 
-            const serversPerPage = 10;
+            const serversPerPage = topServersCount || 10;
             const startIndex = currentServerPage * serversPerPage;
             const endIndex = Math.min(startIndex + serversPerPage, allTopServers.length);
             const currentServers = allTopServers.slice(startIndex, endIndex);
 
             // Update servers list
             let serversList = `<ol start="${startIndex + 1}" style="padding-left: 20px; margin: 0; font-family: 'Courier New', Courier, monospace; font-size: 13px;">`;
-            currentServers.forEach(({ name, hours }) => {
-                serversList += `<li style="margin-bottom: 4px; line-height: 1.3;">${name} — ${hours.toFixed(2)} hrs</li>`;
+            currentServers.forEach(server => {
+                const firstSeenPart = (showServerFirstSeen && server.firstSeen) ? ` — first seen ${new Date(server.firstSeen).toLocaleString()}` : '';
+                serversList += `<li style="margin-bottom: 4px; line-height: 1.3;">${server.name} — ${server.hours.toFixed(2)} hrs${firstSeenPart}</li>`;
             });
             serversList += `</ol>`;
             serversContent.innerHTML = serversList;
@@ -689,7 +944,7 @@ User Agent: ${navigator.userAgent}
 
         window.nextServerPage = () => {
             console.log('[BMA Debug] nextServerPage called, currentPage:', currentServerPage, 'totalServers:', allTopServers.length);
-            const totalPages = Math.ceil(allTopServers.length / 10);
+            const totalPages = Math.ceil(allTopServers.length / (topServersCount || 10));
             if (currentServerPage < totalPages - 1) {
                 currentServerPage++;
                 console.log('[BMA Debug] Moving to page:', currentServerPage);
@@ -711,12 +966,14 @@ User Agent: ${navigator.userAgent}
         };
 
         window.copyPlayerInfo = () => {
-            const playerName = document.querySelector('#bmt-info-box').textContent.match(/Player: (.+)/)?.[1] || 'Unknown';
-            const playerID = document.querySelector('#bmt-info-box').textContent.match(/ID: (.+)/)?.[1] || 'Unknown';
-            const totalHours = document.querySelector('#bmt-info-box').textContent.match(/True Rust Hours: (.+)/)?.[1] || '0';
+            const infoBoxEl = document.getElementById('bmt-info-box');
+            const infoText = infoBoxEl ? infoBoxEl.textContent : '';
+            const playerName = infoText.match(/Player:\s*(.+)/)?.[1]?.trim() || 'Unknown';
+            const playerID = infoText.match(/ID:\s*(.+)/)?.[1]?.trim() || 'Unknown';
+            const totalHours = infoText.match(/True Rust Hours:\s*(.+)/)?.[1]?.trim() || '0';
 
             // Extract both relative time and full date from the first seen section
-            const fullText = document.querySelector('#bmt-info-box').textContent;
+            const fullText = infoText;
             const firstSeenMatch = fullText.match(/First Time Seen on Rust\s+(.*?)(?=Total Rust Servers Played|$)/s);
             let firstSeen = 'Unknown';
 
@@ -733,7 +990,7 @@ User Agent: ${navigator.userAgent}
                 }
             }
 
-            const totalServers = document.querySelector('#bmt-info-box').textContent.match(/Total Rust Servers Played: (\d+)/)?.[1] || '0';
+            const totalServers = fullText.match(/Total Rust Servers Played:\s*(\d+)/)?.[1] || '0';
 
             // Get current server info (most recently played)
             let currentServer = 'Not currently playing';
@@ -751,8 +1008,8 @@ User Agent: ${navigator.userAgent}
             // Full server list (top 10)
             let fullServerList = '';
             if (allTopServers.length > 0) {
-                const top10 = allTopServers.slice(0, 10);
-                fullServerList = top10.map((server, index) =>
+                const topN = allTopServers.slice(0, topServersCount || 10);
+                fullServerList = topN.map((server, index) =>
                     `${index + 1}. ${server.name} — ${server.hours.toFixed(2)} hrs`
                 ).join('\n');
             } else {
@@ -762,20 +1019,22 @@ User Agent: ${navigator.userAgent}
             // Get top 5 recent servers for "Recently Played" section with last seen
             let recentServers = '';
             if (allTopServers.length > 0) {
-                const recent5 = allTopServers.slice(0, 5);
+                const recentCount = Math.min(5, topServersCount || 10);
+                const recent5 = allTopServers.slice(0, recentCount);
                 recentServers = recent5.map((server, index) => {
                     let lastSeenText = '';
                     if (server.lastSeen) {
                         const lastSeenTime = toRelativeTime(server.lastSeen);
                         lastSeenText = ` (last seen ${lastSeenTime})`;
                     }
-                    return `${index + 1}. ${server.name} — ${server.hours.toFixed(2)} hrs${lastSeenText}`;
+                    const firstSeenText = (showServerFirstSeen && server.firstSeen) ? ` (first seen ${toRelativeTime(server.firstSeen)})` : '';
+                    return `${index + 1}. ${server.name} — ${server.hours.toFixed(2)} hrs${lastSeenText}${firstSeenText}`;
                 }).join('\n');
             } else {
                 recentServers = 'No recent servers found';
             }
 
-            const copyText = `\`\`\`Rust Player Profile\n\nPlayer: ${playerName}\nbattlemetrics id: ${playerID}\nTotal Rust Hours: ${totalHours}\nFirst Seen: ${firstSeen}\nTotal Servers Played: ${totalServers}\n\nCurrent Server: ${currentServer}\n\nTop 10 Servers by Hours:\n${fullServerList}\n\nRecently Played Servers:\n${recentServers}\n\nGenerated by BattleMetrics Rust Analytics\`\`\``;
+            const copyText = `\`\`\`Rust Player Profile\n\nPlayer: ${playerName}\nbattlemetrics id: ${playerID}\nTotal Rust Hours: ${totalHours}\nFirst Seen: ${firstSeen}\nTotal Servers Played: ${totalServers}\n\nCurrent Server: ${currentServer}\n\nTop ${topServersCount || 10} Servers by Hours:\n${fullServerList}\n\nRecently Played Servers:\n${recentServers}\n\nGenerated by BattleMetrics Rust Analytics\`\`\``;
 
             navigator.clipboard.writeText(copyText).then(() => {
                 // Show success feedback
@@ -806,6 +1065,58 @@ User Agent: ${navigator.userAgent}
                         copyBtn.textContent = originalText;
                     }, 2000);
                 }
+            });
+        };
+
+        // Copy ALL servers (detailed JSON) for AI/data export
+        window.copyAllServersDetailed = () => {
+            const infoBoxEl = document.getElementById('bmt-info-box');
+            const infoText = infoBoxEl ? infoBoxEl.textContent : '';
+            const playerName = infoText.match(/Player:\s*(.+)/)?.[1]?.trim() || 'Unknown';
+            const playerID = infoText.match(/ID:\s*(.+)/)?.[1]?.trim() || 'Unknown';
+
+            const servers = (allTopServers || []).map((s) => ({
+                name: s.name || null,
+                hours: typeof s.hours === 'number' ? parseFloat(s.hours.toFixed(2)) : (s.hours || 0),
+                firstSeen: s.firstSeen || null,
+                lastSeen: s.lastSeen || null
+            }));
+
+            // Compute total hours across exported servers (rounded to 2 decimals)
+            const totalHours = parseFloat((servers.reduce((acc, s) => acc + (s.hours || 0), 0)).toFixed(2));
+
+            const payload = {
+                tool: 'BattleMetrics Rust Analytics',
+                version: SCRIPT_VERSION,
+                exportTime: new Date().toISOString(),
+                player: {
+                    name: playerName,
+                    id: playerID,
+                    totalHours: totalHours || null
+                },
+                servers: servers
+            };
+
+            const jsonText = JSON.stringify(payload, null, 2);
+
+            navigator.clipboard.writeText(jsonText).then(() => {
+                const copyBtn = document.querySelector('button[onclick="copyAllServersDetailed()"]');
+                if (copyBtn) {
+                    const originalText = copyBtn.textContent;
+                    copyBtn.textContent = 'Copied!';
+                    copyBtn.style.background = '#28a745';
+                    setTimeout(() => {
+                        copyBtn.textContent = originalText;
+                        copyBtn.style.background = '#17a2b8';
+                    }, 2000);
+                }
+            }).catch(() => {
+                const area = document.createElement('textarea');
+                area.value = jsonText;
+                document.body.appendChild(area);
+                area.select();
+                document.execCommand('copy');
+                document.body.removeChild(area);
             });
         };
 
@@ -905,6 +1216,8 @@ User Agent: ${navigator.userAgent}
         setTimeout(() => {
             const autoPullToggle = document.getElementById('auto-pull-toggle');
             const debugToggle = document.getElementById('debug-console-toggle');
+            const showFirstSeenToggle = document.getElementById('show-server-firstseen-toggle');
+            const hideMiniToggle = document.getElementById('hide-mini-toggle');
             
             if (autoPullToggle) {
                 autoPullToggle.addEventListener('change', (e) => {
@@ -945,6 +1258,137 @@ User Agent: ${navigator.userAgent}
                             debugConsole.updateDebugStats();
                         }, 100);
                     }
+                });
+            }
+
+            if (hideMiniToggle) {
+                hideMiniToggle.addEventListener('change', (e) => {
+                    hideMiniOnLoad = e.target.checked;
+                    saveSettings();
+                    debugLog('info', `Start minimized ${hideMiniOnLoad ? 'enabled' : 'disabled'}`);
+
+                    // Apply visibility: if start-minimized enabled, hide menu immediately
+                    setMenuVisibility(!hideMiniOnLoad);
+                });
+            }
+
+            const checkUpdatesToggle = document.getElementById('check-updates-toggle');
+            if (checkUpdatesToggle) {
+                checkUpdatesToggle.addEventListener('change', (e) => {
+                    checkForUpdates = e.target.checked;
+                    saveSettings();
+                    debugLog('info', `Check-for-updates ${checkForUpdates ? 'enabled' : 'disabled'}`);
+
+                    if (checkForUpdates) {
+                        checkForUpdatesAvailable();
+                    } else {
+                        updateAvailable = false;
+                        updateAvailableVersion = null;
+                        updateUpdateBannerDisplay();
+                    }
+                });
+            }
+
+            const topServersSelect = document.getElementById('top-servers-count-select');
+            if (topServersSelect) {
+                topServersSelect.addEventListener('change', (e) => {
+                    topServersCount = Number(e.target.value) || 10;
+                    saveSettings();
+                    debugLog('info', `Top servers count set to ${topServersCount}`);
+                    // Refresh servers list view and copy behavior
+                    if (window.updateServersList) window.updateServersList();
+                });
+            }
+
+            const resetBtn = document.getElementById('reset-settings-btn');
+            if (resetBtn) {
+                resetBtn.addEventListener('click', () => {
+                    // Reset all known settings to defaults
+                    autoPullEnabled = true;
+                    debugConsoleEnabled = false;
+                    showServerFirstSeen = false;
+                    hideMiniOnLoad = false;
+                    checkForUpdates = true;
+                    topServersCount = 10;
+                    showCopyAllDetailed = false;
+                    autoCaptureErrors = true;
+                    saveSettings();
+                    debugLog('info', 'Settings reset to defaults');
+
+                    // Update UI controls to reflect defaults
+                    const autoEl = document.getElementById('auto-pull-toggle'); if (autoEl) autoEl.checked = autoPullEnabled;
+                    const debugEl = document.getElementById('debug-console-toggle'); if (debugEl) debugEl.checked = debugConsoleEnabled;
+                    const showFirstEl = document.getElementById('show-server-firstseen-toggle'); if (showFirstEl) showFirstEl.checked = showServerFirstSeen;
+                    const hideMiniEl = document.getElementById('hide-mini-toggle'); if (hideMiniEl) hideMiniEl.checked = hideMiniOnLoad;
+                    const checkUpdEl = document.getElementById('check-updates-toggle'); if (checkUpdEl) checkUpdEl.checked = checkForUpdates;
+                    const topSel = document.getElementById('top-servers-count-select'); if (topSel) topSel.value = String(topServersCount);
+                    const showCopyEl = document.getElementById('show-copyall-toggle'); if (showCopyEl) showCopyEl.checked = showCopyAllDetailed;
+                    const autoCaptureEl = document.getElementById('auto-capture-errors-toggle'); if (autoCaptureEl) autoCaptureEl.checked = autoCaptureErrors;
+
+                    // Apply visibility default
+                    setMenuVisibility(!hideMiniOnLoad);
+                    // Stop auto-pull if disabled, start if enabled
+                    if (autoPullEnabled) startAutoPull(); else stopAutoPull();
+                    // Hide debug console section
+                    const debugSection = document.getElementById('debug-console-section'); if (debugSection) debugSection.style.display = debugConsoleEnabled ? 'block' : 'none';
+                    // Attach/detach error handlers according to default
+                    if (autoCaptureErrors) attachErrorHandlers(); else detachErrorHandlers();
+                    // Update servers list
+                    if (window.updateServersList) window.updateServersList();
+                });
+            }
+
+            const checkNowBtn = document.getElementById('check-updates-now-btn');
+            if (checkNowBtn) {
+                checkNowBtn.addEventListener('click', async () => {
+                    const original = checkNowBtn.textContent;
+                    try {
+                        checkNowBtn.textContent = 'Checking...';
+                        await checkForUpdatesAvailable();
+                        // Small visual feedback
+                        if (updateAvailable) {
+                            checkNowBtn.textContent = `Update v${updateAvailableVersion} available`;
+                            setTimeout(() => { checkNowBtn.textContent = original; }, 3000);
+                        } else {
+                            checkNowBtn.textContent = 'Up to date';
+                            setTimeout(() => { checkNowBtn.textContent = original; }, 2000);
+                        }
+                    } catch (e) {
+                        checkNowBtn.textContent = 'Check failed';
+                        setTimeout(() => { checkNowBtn.textContent = original; }, 2000);
+                    }
+                });
+            }
+
+                const showCopyToggle = document.getElementById('show-copyall-toggle');
+                if (showCopyToggle) {
+                    showCopyToggle.addEventListener('change', (e) => {
+                        showCopyAllDetailed = e.target.checked;
+                        saveSettings();
+                        debugLog('info', `Show Copy All Detailed ${showCopyAllDetailed ? 'enabled' : 'disabled'}`);
+                        const el = document.getElementById('copy-all-detailed-btn');
+                        if (el) el.style.display = showCopyAllDetailed ? 'inline-block' : 'none';
+                    });
+                }
+
+                const autoCaptureToggle = document.getElementById('auto-capture-errors-toggle');
+                if (autoCaptureToggle) {
+                    autoCaptureToggle.addEventListener('change', (e) => {
+                        autoCaptureErrors = e.target.checked;
+                        saveSettings();
+                        debugLog('info', `Auto-capture errors ${autoCaptureErrors ? 'enabled' : 'disabled'}`);
+                        if (autoCaptureErrors) attachErrorHandlers(); else detachErrorHandlers();
+                    });
+                }
+
+            if (showFirstSeenToggle) {
+                showFirstSeenToggle.addEventListener('change', (e) => {
+                    showServerFirstSeen = e.target.checked;
+                    saveSettings();
+                    debugLog('info', `Show per-server first seen ${showServerFirstSeen ? 'enabled' : 'disabled'}`);
+
+                    // Refresh servers list rendering if present
+                    if (window.updateServersList) window.updateServersList();
                 });
             }
         }, 100);
@@ -1043,11 +1487,12 @@ User Agent: ${navigator.userAgent}
                             earliestRustFirstSeen = playerStats.firstSeen;
                         }
 
-                        rustServersPlayed.push({
-                            name: serverDetails.name || "Unnamed Server",
-                            seconds: timePlayed,
-                            lastSeen: playerStats.lastSeen
-                        });
+                            rustServersPlayed.push({
+                                name: serverDetails.name || "Unnamed Server",
+                                seconds: timePlayed,
+                                lastSeen: playerStats.lastSeen,
+                                firstSeen: playerStats.firstSeen
+                            });
                     }
                 });
             }
@@ -1068,7 +1513,8 @@ User Agent: ${navigator.userAgent}
             const processedServers = rustServersPlayed.map(s => ({
                 name: s.name,
                 hours: s.seconds / 3600,
-                lastSeen: s.lastSeen
+                lastSeen: s.lastSeen,
+                firstSeen: s.firstSeen || null
             }));
 
             showInfoBox(playerName, urlPlayerID, totalHours, firstSeenData, processedServers, rustServersPlayed.length, false, "", earliestRustFirstSeen);
@@ -1225,7 +1671,8 @@ User Agent: ${navigator.userAgent}
                             rustServersPlayed.push({
                                 name: serverDetails.name || "Unnamed Server",
                                 seconds: timePlayed,
-                                lastSeen: playerStats.lastSeen
+                                lastSeen: playerStats.lastSeen,
+                                firstSeen: playerStats.firstSeen
                             });
                         }
                     });
@@ -1254,7 +1701,8 @@ User Agent: ${navigator.userAgent}
                     const processedServers = rustServersPlayed.map(s => ({
                         name: s.name,
                         hours: s.seconds / 3600,
-                        lastSeen: s.lastSeen
+                        lastSeen: s.lastSeen,
+                        firstSeen: s.firstSeen || null
                     }));
 
                     showInfoBox(playerName, urlPlayerID, totalHours, firstSeenData, processedServers, rustServersPlayed.length, false, "", earliestRustFirstSeen);
@@ -1345,6 +1793,11 @@ User Agent: ${navigator.userAgent}
 
         // Create toggle button
         createToggleButton();
+
+        // Apply start-minimized setting if enabled (hide the menu but keep toggle visible)
+        if (hideMiniOnLoad) {
+            setMenuVisibility(false);
+        }
 
         // Apply current visibility state
         updateButtonsVisibility();
