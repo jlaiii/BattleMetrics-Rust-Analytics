@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Server Monitor & Alert System
 // @namespace    http://tampermonkey.net/
-// @version      1.0.2
+// @version      1.0.3
 // @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/servers/*
@@ -43,12 +43,10 @@
     };
 
     // Update/check settings (global)
-    const SCRIPT_VERSION = '1.0.2';
+    const SCRIPT_VERSION = '1.0.3';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js';
-    const INSTALL_URL = GITHUB_RAW_URL; // Opening raw will prompt userscript manager to install
+    const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
     const AUTO_CHECK_KEY = 'bms_auto_check_updates';
-    const AUTO_INSTALL_KEY = 'bms_auto_install_updates';
-    const LAST_AUTO_INSTALL_KEY = 'bms_last_auto_install_open';
     let updateAvailable = false;
     let updateAvailableVersion = null;
 
@@ -77,17 +75,7 @@
         return val === 'true';
     };
     const saveAutoCheckSetting = (v) => localStorage.setItem(AUTO_CHECK_KEY, v ? 'true' : 'false');
-    const loadAutoInstallSetting = () => {
-        const val = localStorage.getItem(AUTO_INSTALL_KEY);
-        if (val === null) return true; // default to ON
-        return val === 'true';
-    };
-    const saveAutoInstallSetting = (v) => localStorage.setItem(AUTO_INSTALL_KEY, v ? 'true' : 'false');
-    const loadLastAutoInstall = () => {
-        const v = localStorage.getItem(LAST_AUTO_INSTALL_KEY);
-        return v ? parseInt(v, 10) : 0;
-    };
-    const saveLastAutoInstall = (ts) => localStorage.setItem(LAST_AUTO_INSTALL_KEY, String(ts || Date.now()));
+    // Note: auto-install behavior removed. Users must click the update banner/toast to install manually.
 
     // Debug Console System
     class DebugConsole {
@@ -411,6 +399,14 @@ User Agent: ${navigator.userAgent}
     const isMenuVisible = () => {
         return localStorage.getItem(MENU_VISIBLE_KEY) !== 'false';
     };
+
+    // Normalize player names for comparison (trim and collapse spaces)
+    const normalizeName = (s) => {
+        if (!s) return '';
+        return s.replace(/\s+/g, ' ').trim();
+    };
+
+    const namesEqual = (a, b) => normalizeName(a).toLowerCase() === normalizeName(b).toLowerCase();
 
     const setMenuVisibility = (visible) => {
         localStorage.setItem(MENU_VISIBLE_KEY, visible.toString());
@@ -1004,15 +1000,17 @@ User Agent: ${navigator.userAgent}
                 const existing = this.playerDatabase[playerId];
                 if (existing) {
                     // If name changed, record previous name history (avoid duplicates)
-                    if (existing.currentName !== playerName) {
-                        existing.previousNames = existing.previousNames || [];
-                        if (existing.currentName && !existing.previousNames.includes(existing.currentName)) {
-                            existing.previousNames.push(existing.currentName);
-                        }
-                        const oldName = existing.currentName;
-                        existing.currentName = playerName;
-                        existing.nameChanged = true;
-                        existing.lastNameChange = now;
+                        if (!namesEqual(existing.currentName, playerName)) {
+                            existing.previousNames = existing.previousNames || [];
+                            const existingNormalized = normalizeName(existing.currentName);
+                            // Avoid duplicate previous names (case/whitespace-insensitive)
+                            if (existing.currentName && !existing.previousNames.some(n => normalizeName(n).toLowerCase() === existingNormalized.toLowerCase())) {
+                                existing.previousNames.push(existing.currentName);
+                            }
+                            const oldName = existing.currentName;
+                            existing.currentName = playerName;
+                            existing.nameChanged = true;
+                            existing.lastNameChange = now;
                         // Record name change in activity log (so it appears in All Activity)
                         try {
                             this.logNameChange(playerId, oldName, playerName);
@@ -2498,11 +2496,6 @@ User Agent: ${navigator.userAgent}
                                            onchange="toggleAutoCheckUpdates(this.checked)" style="margin-right: 8px;">
                                     Auto-check for updates
                                 </label>
-                                <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
-                                    <input type="checkbox" id="auto-install-updates" 
-                                           onchange="toggleAutoInstallUpdates(this.checked)" style="margin-right: 8px;">
-                                    Auto-install updates when available
-                                </label>
                                 <div style="margin-top:6px; display:flex; gap:6px;">
                                     <button onclick="checkForUpdatesNow()"
                                             style="background: #007bff; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 11px;">
@@ -2628,9 +2621,7 @@ User Agent: ${navigator.userAgent}
                 debugConsole.updateDebugDisplay();
                 // Initialize update checkboxes
                 const autoCheckCb = document.getElementById('auto-check-updates');
-                const autoInstallCb = document.getElementById('auto-install-updates');
                 if (autoCheckCb) autoCheckCb.checked = loadAutoCheckSetting();
-                if (autoInstallCb) autoInstallCb.checked = loadAutoInstallSetting();
                 // initialize sound select
                 try {
                     const soundSelect = document.getElementById('sound-select');
@@ -3681,11 +3672,6 @@ User Agent: ${navigator.userAgent}
         if (debugConsole) debugConsole.info('Auto-check updates: ' + !!enabled);
     };
 
-    window.toggleAutoInstallUpdates = (enabled) => {
-        saveAutoInstallSetting(!!enabled);
-        if (debugConsole) debugConsole.info('Auto-install updates: ' + !!enabled);
-    };
-
     window.checkForUpdatesNow = async () => {
         try {
             await checkForUpdatesAvailable(true, true);
@@ -3864,7 +3850,6 @@ User Agent: ${navigator.userAgent}
         localStorage.removeItem('bms_debug_verbose');
         localStorage.removeItem('bms_debug_autoexport');
         localStorage.removeItem('bms_auto_check_updates');
-        localStorage.removeItem('bms_auto_install_updates');
         localStorage.removeItem(MENU_VISIBLE_KEY);
 
         // Server-specific settings if serverMonitor exists
@@ -3891,15 +3876,10 @@ User Agent: ${navigator.userAgent}
         // Update settings UI checkboxes
         const debugCb = document.getElementById('debug-mode');
         const autoCheckCb = document.getElementById('auto-check-updates');
-        const autoInstallCb = document.getElementById('auto-install-updates');
         if (debugCb) debugCb.checked = false;
         if (autoCheckCb) {
             autoCheckCb.checked = true; // default to ON
             saveAutoCheckSetting(true);
-        }
-        if (autoInstallCb) {
-            autoInstallCb.checked = true; // default to ON
-            saveAutoInstallSetting(true);
         }
 
         alert('Settings reset to defaults.');
@@ -4386,24 +4366,7 @@ User Agent: ${navigator.userAgent}
                         banner.textContent = `Update available v${remoteVer} — Click to install`;
                     }
 
-                    // Auto-install if enabled (throttle to once per 24 hours)
-                    if (loadAutoInstallSetting()) {
-                        try {
-                            const last = loadLastAutoInstall() || 0;
-                            const now = Date.now();
-                            const dayMs = 24 * 60 * 60 * 1000;
-                            if (now - last > dayMs) {
-                                if (debugConsole) debugConsole.info('Auto-install is enabled — opening install URL');
-                                window.openInstall();
-                                saveLastAutoInstall(now);
-                            } else {
-                                if (debugConsole) debugConsole.info('Auto-install skipped (opened recently)');
-                            }
-                        } catch (e) {
-                            if (debugConsole) debugConsole.warn('Auto-install throttle check failed', e);
-                            try { window.openInstall(); } catch (e2) {}
-                        }
-                    }
+                    // Auto-install behavior removed: users must click the update banner/toast to install.
                     // Show toast to user for forced checks or always for discovered update
                     showUpdateToast(`Update available v${remoteVer} — Click to install`, true, remoteVer);
                 } else {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Rust Analytics
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.3
 // @description  analytics tool for BattleMetrics that displays Rust player statistics including total playtime, first seen date, and their players top servers by hours
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/*
@@ -13,10 +13,10 @@
     'use strict';
 
     // Script version constant used for update checks and displays
-    const SCRIPT_VERSION = '1.0.1';
+    const SCRIPT_VERSION = '1.0.3';
     // GitHub raw URL for the userscript (Tampermonkey will detect and offer install)
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMplayer.user.js';
-    const INSTALL_URL = GITHUB_RAW_URL;
+    const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
     let updateAvailable = false;
     let updateAvailableVersion = null;
     const INFO_BOX_ID = 'bmt-info-box';
@@ -37,7 +37,8 @@
     let showServerFirstSeen = false;
     let autoPullInterval = null;
     let checkForUpdates = true; // when true, script will check GitHub for newer versions
-    let autoInstallUpdates = true; // when true, script will attempt to open install URL when update found
+    // auto-install removed; users must click update link to install manually
+    let autoInstallUpdates = true; // kept for backward-compat UI but auto-open disabled
     
     let topServersCount = 10; // how many top servers to show/copy by default
     let showCopyAllDetailed = false; // whether to show the "Copy All Servers (detailed)" button
@@ -485,7 +486,7 @@ User Agent: ${navigator.userAgent}
                     updateAvailableVersion = remoteVer;
                     debugLog('info', `Update available v${remoteVer}`);
                     // If auto-install is enabled, try to auto-open the install URL once per remote version
-                    tryAutoInstallUpdate(remoteVer);
+                    // Auto-install removed: user must click the update banner/toast to install manually
                 } else {
                     updateAvailable = false;
                     updateAvailableVersion = null;
@@ -498,29 +499,13 @@ User Agent: ${navigator.userAgent}
     };
 
     const tryAutoInstallUpdate = (remoteVersion) => {
+        // Auto-install removed: keep stub for compatibility and logging only
         try {
-            if (!autoInstallUpdates) return;
-            if (!remoteVersion) return;
-            const lastAttempt = localStorage.getItem(AUTO_INSTALL_VERSION_KEY);
-            if (lastAttempt === remoteVersion) {
-                debugLog('info', `Auto-install already attempted for v${remoteVersion}, skipping`);
-                return;
-            }
-
-            debugLog('info', `Auto-install enabled — opening install URL for v${remoteVersion}`);
-            // Opening the install URL will trigger the userscript manager install/update prompt.
-            try {
-                window.open(INSTALL_URL, '_blank');
-            } catch (e) {
-                // Fallback: set location to install URL
-                try { window.location.href = INSTALL_URL; } catch (e2) { /* ignore */ }
-            }
-
-            // Record we attempted auto-install for this version to avoid repeat opens
-            localStorage.setItem(AUTO_INSTALL_VERSION_KEY, remoteVersion);
+            if (debugLog) debugLog('info', `Auto-install disabled; user must click update banner for v${remoteVersion}`);
         } catch (e) {
-            debugLog('warn', 'Auto-install attempt failed', e);
+            // noop
         }
+        return;
     };
 
     window.openInstall = () => {
@@ -789,8 +774,7 @@ User Agent: ${navigator.userAgent}
                         </div>
                         <div style="margin-top:8px;">
                             <label style="display: flex; align-items: center; cursor: pointer; font-size: 12px;">
-                                <input type="checkbox" id="auto-install-updates-toggle" ${autoInstallUpdates ? 'checked' : ''} style="margin-right: 8px;">
-                                Auto-install updates when available
+                                <!-- Auto-install removed: users must click update banner -->
                             </label>
                             <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 2px;">
                                 When enabled, the script will open the install URL when a newer version is detected (attempts once per version).
@@ -1338,10 +1322,7 @@ User Agent: ${navigator.userAgent}
                     saveSettings();
                     debugLog('info', `Auto-install updates ${autoInstallUpdates ? 'enabled' : 'disabled'}`);
 
-                    // If enabling and an update is already available, attempt install now
-                    if (autoInstallUpdates && updateAvailable && updateAvailableVersion) {
-                        tryAutoInstallUpdate(updateAvailableVersion);
-                    }
+                    // If enabling and an update is already available, user must still click the update banner to install
                 });
             }
 
