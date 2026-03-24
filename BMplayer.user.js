@@ -24,6 +24,7 @@
     const TOGGLE_BUTTON_ID = 'bmt-toggle-button';
     const RELOAD_FLAG = 'bmt_force_recalc_after_load';
     const MENU_VISIBLE_KEY = 'bmt_menu_visible';
+    const AUTO_INSTALL_VERSION_KEY = 'bma_auto_installed_version';
 
     let currentPlayerID = null;
     let lastURL = window.location.href;
@@ -36,6 +37,7 @@
     let showServerFirstSeen = false;
     let autoPullInterval = null;
     let checkForUpdates = true; // when true, script will check GitHub for newer versions
+    let autoInstallUpdates = true; // when true, script will attempt to open install URL when update found
     
     let topServersCount = 10; // how many top servers to show/copy by default
     let showCopyAllDetailed = false; // whether to show the "Copy All Servers (detailed)" button
@@ -49,8 +51,9 @@
             showServerFirstSeen = settings.showServerFirstSeen === true; // Default to false
             hideMiniOnLoad = settings.hideMiniOnLoad === true; // Default to false (show menu)
             checkForUpdates = settings.checkForUpdates !== false; // Default to true
+            autoInstallUpdates = settings.autoInstallUpdates !== false; // Default to true
             topServersCount = Number(settings.topServersCount) || 10;
-            showCopyAllDetailed = settings.showCopyAllDetailed === true;
+            showCopyAllDetailed = (settings.hasOwnProperty('showCopyAllDetailed')) ? settings.showCopyAllDetailed === true : false;
             autoCaptureErrors = settings.autoCaptureErrors !== false;
         } catch (e) {
             autoPullEnabled = true;
@@ -58,6 +61,7 @@
             showServerFirstSeen = false;
             hideMiniOnLoad = false;
             checkForUpdates = true;
+            autoInstallUpdates = true;
             topServersCount = 10;
             showCopyAllDetailed = false;
             autoCaptureErrors = true;
@@ -71,6 +75,7 @@
             ,showServerFirstSeen,
             hideMiniOnLoad
             ,checkForUpdates
+            ,autoInstallUpdates
             ,topServersCount
             ,showCopyAllDetailed
             ,autoCaptureErrors
@@ -479,6 +484,8 @@ User Agent: ${navigator.userAgent}
                     updateAvailable = true;
                     updateAvailableVersion = remoteVer;
                     debugLog('info', `Update available v${remoteVer}`);
+                    // If auto-install is enabled, try to auto-open the install URL once per remote version
+                    tryAutoInstallUpdate(remoteVer);
                 } else {
                     updateAvailable = false;
                     updateAvailableVersion = null;
@@ -487,6 +494,32 @@ User Agent: ${navigator.userAgent}
             }
         } catch (e) {
             debugLog('warn', 'Update check failed', e);
+        }
+    };
+
+    const tryAutoInstallUpdate = (remoteVersion) => {
+        try {
+            if (!autoInstallUpdates) return;
+            if (!remoteVersion) return;
+            const lastAttempt = localStorage.getItem(AUTO_INSTALL_VERSION_KEY);
+            if (lastAttempt === remoteVersion) {
+                debugLog('info', `Auto-install already attempted for v${remoteVersion}, skipping`);
+                return;
+            }
+
+            debugLog('info', `Auto-install enabled — opening install URL for v${remoteVersion}`);
+            // Opening the install URL will trigger the userscript manager install/update prompt.
+            try {
+                window.open(INSTALL_URL, '_blank');
+            } catch (e) {
+                // Fallback: set location to install URL
+                try { window.location.href = INSTALL_URL; } catch (e2) { /* ignore */ }
+            }
+
+            // Record we attempted auto-install for this version to avoid repeat opens
+            localStorage.setItem(AUTO_INSTALL_VERSION_KEY, remoteVersion);
+        } catch (e) {
+            debugLog('warn', 'Auto-install attempt failed', e);
         }
     };
 
@@ -752,6 +785,15 @@ User Agent: ${navigator.userAgent}
                             </label>
                             <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 2px;">
                                 When enabled, the script will check GitHub for a newer release and show an update banner in the menu.
+                            </div>
+                        </div>
+                        <div style="margin-top:8px;">
+                            <label style="display: flex; align-items: center; cursor: pointer; font-size: 12px;">
+                                <input type="checkbox" id="auto-install-updates-toggle" ${autoInstallUpdates ? 'checked' : ''} style="margin-right: 8px;">
+                                Auto-install updates when available
+                            </label>
+                            <div style="font-size: 10px; opacity: 0.7; margin-left: 20px; margin-top: 2px;">
+                                When enabled, the script will open the install URL when a newer version is detected (attempts once per version).
                             </div>
                         </div>
                         <div style="margin-top:8px;">
@@ -1289,6 +1331,20 @@ User Agent: ${navigator.userAgent}
                 });
             }
 
+            const autoInstallToggle = document.getElementById('auto-install-updates-toggle');
+            if (autoInstallToggle) {
+                autoInstallToggle.addEventListener('change', (e) => {
+                    autoInstallUpdates = e.target.checked;
+                    saveSettings();
+                    debugLog('info', `Auto-install updates ${autoInstallUpdates ? 'enabled' : 'disabled'}`);
+
+                    // If enabling and an update is already available, attempt install now
+                    if (autoInstallUpdates && updateAvailable && updateAvailableVersion) {
+                        tryAutoInstallUpdate(updateAvailableVersion);
+                    }
+                });
+            }
+
             const topServersSelect = document.getElementById('top-servers-count-select');
             if (topServersSelect) {
                 topServersSelect.addEventListener('change', (e) => {
@@ -1309,6 +1365,7 @@ User Agent: ${navigator.userAgent}
                     showServerFirstSeen = false;
                     hideMiniOnLoad = false;
                     checkForUpdates = true;
+                    autoInstallUpdates = true;
                     topServersCount = 10;
                     showCopyAllDetailed = false;
                     autoCaptureErrors = true;
@@ -1321,6 +1378,7 @@ User Agent: ${navigator.userAgent}
                     const showFirstEl = document.getElementById('show-server-firstseen-toggle'); if (showFirstEl) showFirstEl.checked = showServerFirstSeen;
                     const hideMiniEl = document.getElementById('hide-mini-toggle'); if (hideMiniEl) hideMiniEl.checked = hideMiniOnLoad;
                     const checkUpdEl = document.getElementById('check-updates-toggle'); if (checkUpdEl) checkUpdEl.checked = checkForUpdates;
+                    const autoInstallEl = document.getElementById('auto-install-updates-toggle'); if (autoInstallEl) autoInstallEl.checked = true;
                     const topSel = document.getElementById('top-servers-count-select'); if (topSel) topSel.value = String(topServersCount);
                     const showCopyEl = document.getElementById('show-copyall-toggle'); if (showCopyEl) showCopyEl.checked = showCopyAllDetailed;
                     const autoCaptureEl = document.getElementById('auto-capture-errors-toggle'); if (autoCaptureEl) autoCaptureEl.checked = autoCaptureErrors;
