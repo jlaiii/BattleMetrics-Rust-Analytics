@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Server Monitor & Alert System
 // @namespace    http://tampermonkey.net/
-// @version      1.0.4
+// @version      1.0.5
 // @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/servers/*
@@ -43,7 +43,7 @@
     };
 
     // Update/check settings (global)
-    const SCRIPT_VERSION = '1.0.4';
+    const SCRIPT_VERSION = '1.0.5';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
     const AUTO_CHECK_KEY = 'bms_auto_check_updates';
@@ -1285,8 +1285,10 @@ User Agent: ${navigator.userAgent}
                 animation: slideDown 0.3s ease-out;
             `;
             
+            const actionText = action === 'joined' ? 'joined the game' : action === 'left' ? 'left the game' : action === 'name_changed' ? 'changed name' : `${action} the game`;
+
             alertDiv.innerHTML = `
-                <div>${playerName} ${action} the game</div>
+                <div>${playerName} ${actionText}</div>
                 <div style="font-size: 12px; opacity: 0.9; margin-top: 4px;">${toRelativeTime(Date.now())}</div>
             `;
 
@@ -2080,7 +2082,7 @@ User Agent: ${navigator.userAgent}
                 let displayName = alert.playerName;
                 let nameChangeInfo = '';
                 
-                if (dbPlayer) {
+                    if (dbPlayer) {
                     displayName = dbPlayer.currentName;
                     if (dbPlayer.nameChanged && dbPlayer.previousNames.length > 0) {
                         // Show the most recent previous name if current name is different from any previous name
@@ -2094,12 +2096,13 @@ User Agent: ${navigator.userAgent}
                         }
                     }
                 }
-                
+                    const actionText = alert.action === 'joined' ? 'joined the game' : alert.action === 'left' ? 'left the game' : alert.action === 'name_changed' ? 'changed name' : `${alert.action} the game`;
+
                 alertsHTML += `
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: ${bgColor}; border-left: 3px solid ${actionColor};">
                         <div style="flex: 1;">
                             <div style="color: ${actionColor}; font-weight: bold; font-size: 12px;">
-                                ${displayName}${nameChangeInfo} ${alert.action} the game
+                                ${displayName}${nameChangeInfo} ${actionText}
                             </div>
                             <div style="opacity: 0.7; font-size: 10px;">${timeAgo} | ID: ${alert.playerId}</div>
                             ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
@@ -3518,12 +3521,13 @@ User Agent: ${navigator.userAgent}
             const actionColor = entry.action === 'joined' ? '#28a745' : entry.action === 'left' ? '#dc3545' : '#ffc107';
             const hasAlert = serverMonitor.alerts[entry.playerId];
             const isSaved = serverMonitor.savedPlayers[entry.playerId];
-            
+            const actionText = entry.action === 'joined' ? 'joined the game' : entry.action === 'left' ? 'left the game' : entry.action === 'name_changed' ? 'changed name' : `${entry.action} the game`;
+
             activityHTML += `
                 <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
                     <div style="flex: 1;">
                         <div style="color: ${actionColor}; font-weight: bold;">
-                            ${entry.playerName} ${entry.action} the game
+                            ${entry.playerName} ${actionText}
                             ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
                             ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
                         </div>

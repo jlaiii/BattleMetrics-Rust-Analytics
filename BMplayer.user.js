@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Rust Analytics
 // @namespace    http://tampermonkey.net/
-// @version      1.0.4
+// @version      1.0.5
 // @description  analytics tool for BattleMetrics that displays Rust player statistics including total playtime, first seen date, and their players top servers by hours
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/*
@@ -13,7 +13,7 @@
     'use strict';
 
     // Script version constant used for update checks and displays
-    const SCRIPT_VERSION = '1.0.4';
+    const SCRIPT_VERSION = '1.0.5';
     // GitHub raw URL for the userscript (Tampermonkey will detect and offer install)
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMplayer.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
