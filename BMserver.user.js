@@ -1992,9 +1992,9 @@ User Agent: ${navigator.userAgent}
                 
                 if (dbPlayer) {
                     displayName = dbPlayer.currentName;
-                    if (dbPlayer.nameChanged && dbPlayer.previousNames.length > 0) {
+                    if (dbPlayer.nameChanged && dbPlayer.previousNames && dbPlayer.previousNames.length > 0) {
                         const originalSavedName = saved.name;
-                        if (originalSavedName !== dbPlayer.currentName) {
+                        if (!namesEqual(originalSavedName, dbPlayer.currentName)) {
                             nameChangeInfo = ` (was: ${originalSavedName})`;
                         }
                     }
@@ -2030,11 +2030,13 @@ User Agent: ${navigator.userAgent}
                                     title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
                                 ${hasAlert ? 'Remove' : 'Add Alert'}
                             </button>
+                            ${ (dbPlayer && dbPlayer.nameChanged && dbPlayer.previousNames && dbPlayer.previousNames.length > 0) ? `
                             <button onclick="showNameHistory('${playerId}')" 
                                     style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                     title="View name history">
                                 History
                             </button>
+                            ` : ''}
                             <button onclick="removeSavedPlayer('${playerId}')" 
                                     style="background: #6c757d; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                     title="Remove from Saved">
@@ -2946,6 +2948,8 @@ User Agent: ${navigator.userAgent}
                     <div style="display:flex; gap:3px;">
                         <button onclick="window.open('https://www.battlemetrics.com/players/${entry.playerId}', '_blank')" style="background:#17a2b8;color:white;border:none;padding:2px 5px;border-radius:3px;font-size:9px;">Profile</button>
                         <button onclick="togglePlayerAlert('${entry.playerName}', '${entry.playerId}')" style="background:${hasAlert ? '#dc3545' : '#28a745'};color:white;border:none;padding:2px 5px;border-radius:3px;font-size:9px;">${hasAlert ? 'Remove' : 'Add Alert'}</button>
+                        <button onclick="savePlayer('${entry.playerName}', '${entry.playerId}')" style="background:${isSaved ? '#6c757d' : '#28a745'};color:white;border:none;padding:2px 5px;border-radius:3px;font-size:9px;" title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>${isSaved ? 'Saved' : 'Save'}</button>
+                        ${ (serverMonitor && serverMonitor.playerDatabase && serverMonitor.playerDatabase[entry.playerId] && serverMonitor.playerDatabase[entry.playerId].previousNames && serverMonitor.playerDatabase[entry.playerId].previousNames.length > 0) ? `<button onclick="showNameHistory('${entry.playerId}')" style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;">History</button>` : '' }
                     </div>
                 </div>
             `;
@@ -3536,6 +3540,12 @@ User Agent: ${navigator.userAgent}
                                 title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
                             ${hasAlert ? 'Remove' : 'Add Alert'}
                         </button>
+                        <button onclick="savePlayer('${entry.playerName}', '${entry.playerId}')" 
+                                style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
+                            ${isSaved ? 'Saved' : 'Save'}
+                        </button>
+                        ${ (serverMonitor && serverMonitor.playerDatabase && serverMonitor.playerDatabase[entry.playerId] && serverMonitor.playerDatabase[entry.playerId].previousNames && serverMonitor.playerDatabase[entry.playerId].previousNames.length > 0) ? `<button onclick="showNameHistory('${entry.playerId}')" style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;">History</button>` : '' }
                     </div>
                 </div>
             `;
