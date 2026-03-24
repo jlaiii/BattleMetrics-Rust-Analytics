@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Server Monitor & Alert System
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.2
 // @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/servers/*
@@ -43,7 +43,7 @@
     };
 
     // Update/check settings (global)
-    const SCRIPT_VERSION = '1.0.1';
+    const SCRIPT_VERSION = '1.0.2';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js';
     const INSTALL_URL = GITHUB_RAW_URL; // Opening raw will prompt userscript manager to install
     const AUTO_CHECK_KEY = 'bms_auto_check_updates';
@@ -98,7 +98,7 @@
             this.autoExportOnError = this.loadAutoExportSetting();
             this.maxLogs = 1000;
             this.aggregates = {}; // signature -> {count, lastSeen, examples: []}
-            this.version = '1.0.1';
+            this.version = '1.0.2';
             window.toggleAutoExportDebug = (enabled) => {
                 console.log('[Debug Console] toggleAutoExportDebug called with:', enabled);
                 if (debugConsole) {
@@ -375,7 +375,7 @@ User Agent: ${navigator.userAgent}
     const debugConsole = new DebugConsole();
     
     // Log script startup
-    debugConsole.info('BattleMetrics Server Monitor v1.0.1 loaded', {
+    debugConsole.info('BattleMetrics Server Monitor v1.0.2 loaded', {
         url: window.location.href,
         userAgent: navigator.userAgent,
         timestamp: new Date().toISOString()
@@ -498,14 +498,20 @@ User Agent: ${navigator.userAgent}
         loadActivityLog() {
             try {
                 const log = JSON.parse(localStorage.getItem(ACTIVITY_LOG_KEY) || '[]');
-                return log.slice(-1000); // Keep last 1000 entries
+                // Keep full activity history (persist locally forever unless user clears)
+                return log || [];
             } catch {
                 return [];
             }
         }
 
         saveActivityLog() {
-            localStorage.setItem(ACTIVITY_LOG_KEY, JSON.stringify(this.activityLog.slice(-1000)));
+            // Save the full activity log to localStorage (no forced truncation)
+            try {
+                localStorage.setItem(ACTIVITY_LOG_KEY, JSON.stringify(this.activityLog));
+            } catch (e) {
+                console.error('Failed to save activity log to localStorage:', e);
+            }
         }
 
         loadSettings() {
@@ -993,48 +999,44 @@ User Agent: ${navigator.userAgent}
 
         addToDatabase(playerId, playerName, skipDisplayUpdate = false) {
             const now = Date.now();
-            let needsUpdate = false;
-            
-            if (this.playerDatabase[playerId]) {
-                // Player exists, check for name change
+            // Always ensure a record exists for the player and update timestamps
+            try {
                 const existing = this.playerDatabase[playerId];
-                if (existing.currentName !== playerName) {
-                    // Name changed
-                    existing.previousNames = existing.previousNames || [];
-                    if (!existing.previousNames.includes(existing.currentName)) {
-                        existing.previousNames.push(existing.currentName);
+                if (existing) {
+                    // If name changed, record previous name history (avoid duplicates)
+                    if (existing.currentName !== playerName) {
+                        existing.previousNames = existing.previousNames || [];
+                        if (existing.currentName && !existing.previousNames.includes(existing.currentName)) {
+                            existing.previousNames.push(existing.currentName);
+                        }
+                        const oldName = existing.currentName;
+                        existing.currentName = playerName;
+                        existing.nameChanged = true;
+                        existing.lastNameChange = now;
+                        // Record name change in activity log (so it appears in All Activity)
+                        try {
+                            this.logNameChange(playerId, oldName, playerName);
+                        } catch (e) {
+                            console.warn('Failed to log name change', e);
+                        }
                     }
-                    const oldName = existing.currentName;
-                    existing.currentName = playerName;
-                    existing.nameChanged = true;
-                    existing.lastNameChange = now;
-                    needsUpdate = true;
-                    try {
-                        // Record a name-change event in activity log
-                        this.logNameChange(playerId, oldName, playerName);
-                    } catch (e) {
-                        console.warn('Failed to log name change', e);
-                    }
+                    existing.lastSeen = now;
+                } else {
+                    // New player - always add to database
+                    this.playerDatabase[playerId] = {
+                        id: playerId,
+                        currentName: playerName,
+                        originalName: playerName,
+                        firstSeen: now,
+                        lastSeen: now,
+                        nameChanged: false,
+                        previousNames: []
+                    };
                 }
-                existing.lastSeen = now;
-            } else {
-                // New player
-                this.playerDatabase[playerId] = {
-                    id: playerId,
-                    currentName: playerName,
-                    originalName: playerName,
-                    firstSeen: now,
-                    lastSeen: now,
-                    nameChanged: false,
-                    previousNames: []
-                };
-                needsUpdate = true;
-            }
-            
-            // Only save and update display if there were significant changes
-            if (needsUpdate) {
+
+                // Persist database (debounced inside savePlayerDatabase)
                 this.savePlayerDatabase();
-                
+
                 // Skip display updates during batch operations (initial load)
                 if (!skipDisplayUpdate) {
                     // Debounce database display updates
@@ -1043,6 +1045,8 @@ User Agent: ${navigator.userAgent}
                         this.updateDatabaseDisplay();
                     }, 1000);
                 }
+            } catch (err) {
+                console.error('addToDatabase failed for', playerId, playerName, err);
             }
         }
 
@@ -1770,6 +1774,12 @@ User Agent: ${navigator.userAgent}
             const activityDiv = document.getElementById('recent-activity-list');
             if (!activityDiv) return;
 
+            // If user is actively searching activity, prefer search results
+            if (typeof activeActivitySearch !== 'undefined' && activeActivitySearch && activeActivitySearch.length >= 2) {
+                try { performActivitySearch(activeActivitySearch); } catch (e) {}
+                return;
+            }
+
             // Check if there's an active filter and apply it
             const filterSelect = document.getElementById('activity-filter');
             if (filterSelect && filterSelect.value !== 'all') {
@@ -2426,14 +2436,18 @@ User Agent: ${navigator.userAgent}
             <!-- Recent Activity -->
             <div style="background: rgba(23, 162, 184, 0.2); border: 1px solid #17a2b8; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
                 <div style="font-size: 14px; font-weight: bold; color: #17a2b8; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('recent-activity')">
-                    All Activity (<span id="activity-count">0</span>) <span id="activity-toggle">▶</span>
+                    All Activity (<span id="activity-count">0</span>) <span id="activity-toggle">▼</span>
                 </div>
-                <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center; display: none;" id="activity-filters">
+                <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center;" id="activity-filters">
+                    <input type="text" id="activity-search" placeholder="Search activity (name, id, action)..." 
+                           style="flex: 1; padding: 5px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 12px;"
+                           oninput="handleActivitySearch(this.value)">
                     <select id="activity-filter" onchange="filterActivity(this.value)" 
                             style="padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
                         <option value="all">All Activity</option>
                         <option value="joined">Joined Only</option>
                         <option value="left">Left Only</option>
+                        <option value="name_changed">Name Changes Only</option>
                         <option value="recent">Most Recent (Last Hour)</option>
                     </select>
                     <button onclick="clearActivityFilter()" 
@@ -2442,7 +2456,7 @@ User Agent: ${navigator.userAgent}
                         Clear
                     </button>
                 </div>
-                <div id="recent-activity-list" style="max-height: 300px; overflow-y: auto; display: none;">
+                <div id="recent-activity-list" style="max-height: 300px; overflow-y: auto; display: block;">
                     No recent activity
                 </div>
             </div>
@@ -2580,7 +2594,7 @@ User Agent: ${navigator.userAgent}
             <!-- Version Info -->
             <div style="text-align: center; padding: 10px; border-top: 1px solid rgba(255,255,255,0.2); margin-top: 10px;">
                 <div style="font-size: 11px; color: #6c757d; opacity: 0.9; margin-bottom:6px;">
-                    BattleMetrics Server Monitor v1.0.1
+                    BattleMetrics Server Monitor v1.0.2
                 </div>
                 <div style="font-size: 12px;">
                     <a href="https://discord.gg/bEPn9UH9Xw" target="_blank" rel="noopener" style="color:#5865F2; font-weight:600; text-decoration:none; margin-right:12px;">Discord</a>
@@ -2866,6 +2880,87 @@ User Agent: ${navigator.userAgent}
                 performPlayerSearch(query);
             }
         }, 150); // 150ms debounce delay
+    };
+
+    // Activity search (debounced, searches activity log for name/id/action)
+    let activitySearchDebounceTimer = null;
+    let activeActivitySearch = '';
+
+    window.handleActivitySearch = (query) => {
+        activeActivitySearch = query;
+        if (activitySearchDebounceTimer) clearTimeout(activitySearchDebounceTimer);
+
+        if (!query || query.length < 2) {
+            activeActivitySearch = '';
+            if (serverMonitor) serverMonitor.updateActivityDisplay();
+            return;
+        }
+
+        activitySearchDebounceTimer = setTimeout(() => {
+            if (activeActivitySearch === query) {
+                performActivitySearch(query);
+            }
+        }, 150);
+    };
+
+    const performActivitySearch = (query) => {
+        if (!serverMonitor) return;
+        const lower = query.toLowerCase();
+        const results = [];
+
+        // Search from most recent to oldest for better UX
+        for (let i = serverMonitor.activityLog.length - 1; i >= 0; i--) {
+            const e = serverMonitor.activityLog[i];
+            try {
+                if ((e.playerName && e.playerName.toLowerCase().includes(lower)) ||
+                    (e.playerId && e.playerId.toLowerCase().includes(lower)) ||
+                    (e.action && e.action.toLowerCase().includes(lower)) ||
+                    (e.oldName && String(e.oldName).toLowerCase().includes(lower))) {
+                    results.push(e);
+                }
+            } catch (err) { /* ignore */ }
+            if (results.length >= 200) break; // limit results
+        }
+
+        const activityDiv = document.getElementById('recent-activity-list');
+        if (!activityDiv) return;
+        renderActivitySearchResults(results, activityDiv);
+    };
+
+    const renderActivitySearchResults = (results, container) => {
+        if (!results || results.length === 0) {
+            container.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No activity found</div>';
+            return;
+        }
+
+        let html = '';
+        results.forEach(entry => {
+            const timeAgo = toRelativeTime(entry.timestamp);
+            const actionColor = entry.action === 'joined' ? '#28a745' : entry.action === 'left' ? '#dc3545' : '#ffc107';
+            const hasAlert = serverMonitor.alerts[entry.playerId];
+            const isSaved = serverMonitor.savedPlayers[entry.playerId];
+
+            let mainText = '';
+            if (entry.action === 'joined') mainText = `${entry.playerName} joined the game`;
+            else if (entry.action === 'left') mainText = `${entry.playerName} left the game`;
+            else if (entry.action === 'name_changed') mainText = `${entry.oldName || 'previous name'} → ${entry.playerName} changed name`;
+            else mainText = `${entry.playerName} ${entry.action}`;
+
+            html += `
+                <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
+                    <div style="flex: 1;">
+                        <div style="color: ${actionColor}; font-weight: bold;">${mainText} ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''} ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}</div>
+                        <div style="opacity: 0.7; font-size: 11px;">${timeAgo} - ${entry.time || new Date(entry.timestamp).toLocaleString()} - ID: ${entry.playerId}</div>
+                    </div>
+                    <div style="display:flex; gap:3px;">
+                        <button onclick="window.open('https://www.battlemetrics.com/players/${entry.playerId}', '_blank')" style="background:#17a2b8;color:white;border:none;padding:2px 5px;border-radius:3px;font-size:9px;">Profile</button>
+                        <button onclick="togglePlayerAlert('${entry.playerName}', '${entry.playerId}')" style="background:${hasAlert ? '#dc3545' : '#28a745'};color:white;border:none;padding:2px 5px;border-radius:3px;font-size:9px;">${hasAlert ? 'Remove' : 'Add Alert'}</button>
+                    </div>
+                </div>
+            `;
+        });
+
+        container.innerHTML = html;
     };
 
     // Debounce mechanism to prevent double-clicks
@@ -3402,6 +3497,9 @@ User Agent: ${navigator.userAgent}
             case 'left':
                 filteredActivity = filteredActivity.filter(entry => entry.action === 'left');
                 break;
+            case 'name_changed':
+                filteredActivity = filteredActivity.filter(entry => entry.action === 'name_changed');
+                break;
             case 'recent':
                 filteredActivity = filteredActivity.filter(entry => entry.timestamp >= oneHourAgo);
                 break;
@@ -3422,7 +3520,7 @@ User Agent: ${navigator.userAgent}
         let activityHTML = '';
         filteredActivity.forEach(entry => {
             const timeAgo = toRelativeTime(entry.timestamp);
-            const actionColor = entry.action === 'joined' ? '#28a745' : '#dc3545';
+            const actionColor = entry.action === 'joined' ? '#28a745' : entry.action === 'left' ? '#dc3545' : '#ffc107';
             const hasAlert = serverMonitor.alerts[entry.playerId];
             const isSaved = serverMonitor.savedPlayers[entry.playerId];
             
@@ -3457,11 +3555,18 @@ User Agent: ${navigator.userAgent}
 
     window.clearActivityFilter = () => {
         const filterSelect = document.getElementById('activity-filter');
+        const searchInput = document.getElementById('activity-search');
         if (filterSelect) {
             filterSelect.value = 'all';
             filterActivity('all');
         }
+        if (searchInput) {
+            searchInput.value = '';
+            activeActivitySearch = '';
+            if (serverMonitor) serverMonitor.updateActivityDisplay();
+        }
     };
+
 
     window.filterDatabase = (filterType) => {
         if (!serverMonitor) return;
