@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Server Monitor & Alert System
 // @namespace    http://tampermonkey.net/
-// @version      1.0.3
+// @version      1.0.4
 // @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/servers/*
@@ -43,7 +43,7 @@
     };
 
     // Update/check settings (global)
-    const SCRIPT_VERSION = '1.0.3';
+    const SCRIPT_VERSION = '1.0.4';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
     const AUTO_CHECK_KEY = 'bms_auto_check_updates';
@@ -4395,11 +4395,11 @@ User Agent: ${navigator.userAgent}
         }
     };
 
-    // Initial check and periodic checks (6 hours)
+    // Initial check and periodic checks (every 1 minute)
     // Initial auto-check (do not show "no updates" toast on page load)
     setTimeout(() => checkForUpdatesAvailable(true, false), 2000);
-    // Periodic auto-checks (quiet unless update available)
-    setInterval(() => checkForUpdatesAvailable(false, false), 6 * 60 * 60 * 1000);
+    // Periodic auto-checks (quiet unless update available) - every 1 minute
+    setInterval(() => checkForUpdatesAvailable(false, false), 60 * 1000);
 
     // Toast notification for updates
     const showUpdateToast = (message, isUpdate = false, version = '') => {
