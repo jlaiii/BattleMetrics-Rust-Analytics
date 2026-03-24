@@ -5,6 +5,8 @@
 // @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/servers/*
+// @updateURL    https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js
+// @downloadURL  https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -40,13 +42,96 @@
         LAST_PLAYER_STATE_KEY = `bms_last_player_state_${serverID}`;
     };
 
+    // Update/check settings (global)
+    const SCRIPT_VERSION = '1.0.1';
+    const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js';
+    const INSTALL_URL = GITHUB_RAW_URL; // Opening raw will prompt userscript manager to install
+    const AUTO_CHECK_KEY = 'bms_auto_check_updates';
+    const AUTO_INSTALL_KEY = 'bms_auto_install_updates';
+    const LAST_AUTO_INSTALL_KEY = 'bms_last_auto_install_open';
+    let updateAvailable = false;
+    let updateAvailableVersion = null;
+
+    const compareVersions = (a, b) => {
+        try {
+            const normalize = (s) => ('' + s).replace(/[^0-9.]/g, '').split('.').map(n => String(parseInt(n, 10) || 0)).join('.');
+            const naStr = normalize(a);
+            const nbStr = normalize(b);
+            const pa = naStr.split('.').map(n => parseInt(n, 10) || 0);
+            const pb = nbStr.split('.').map(n => parseInt(n, 10) || 0);
+            for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+                const na = pa[i] || 0;
+                const nb = pb[i] || 0;
+                if (na > nb) return 1;
+                if (na < nb) return -1;
+            }
+            return 0;
+        } catch (e) {
+            return 0;
+        }
+    };
+
+    const loadAutoCheckSetting = () => {
+        const val = localStorage.getItem(AUTO_CHECK_KEY);
+        if (val === null) return true; // default to ON
+        return val === 'true';
+    };
+    const saveAutoCheckSetting = (v) => localStorage.setItem(AUTO_CHECK_KEY, v ? 'true' : 'false');
+    const loadAutoInstallSetting = () => {
+        const val = localStorage.getItem(AUTO_INSTALL_KEY);
+        if (val === null) return true; // default to ON
+        return val === 'true';
+    };
+    const saveAutoInstallSetting = (v) => localStorage.setItem(AUTO_INSTALL_KEY, v ? 'true' : 'false');
+    const loadLastAutoInstall = () => {
+        const v = localStorage.getItem(LAST_AUTO_INSTALL_KEY);
+        return v ? parseInt(v, 10) : 0;
+    };
+    const saveLastAutoInstall = (ts) => localStorage.setItem(LAST_AUTO_INSTALL_KEY, String(ts || Date.now()));
+
     // Debug Console System
     class DebugConsole {
         constructor() {
             this.logs = [];
             this.enabled = this.loadDebugSetting();
+            this.verbose = this.loadVerboseSetting();
+            this.autoExportOnError = this.loadAutoExportSetting();
             this.maxLogs = 1000;
+            this.aggregates = {}; // signature -> {count, lastSeen, examples: []}
             this.version = '1.0.1';
+            window.toggleAutoExportDebug = (enabled) => {
+                console.log('[Debug Console] toggleAutoExportDebug called with:', enabled);
+                if (debugConsole) {
+                    debugConsole.saveAutoExportSetting(enabled);
+                }
+            };
+
+            // Temporarily enable verbose capture of site errors for a duration (ms)
+            // Usage: captureSiteErrorsFor(60000) — captures for 60s then restores previous setting
+            window.captureSiteErrorsFor = (ms = 60000) => {
+                if (!debugConsole) return alert('Debug console not initialized');
+                try {
+                    const prev = debugConsole.verbose;
+                    debugConsole.saveVerboseSetting(true);
+                    debugConsole.info('Temporary verbose capture enabled for ' + ms + 'ms');
+                    setTimeout(() => {
+                        debugConsole.saveVerboseSetting(!!prev);
+                        debugConsole.info('Temporary verbose capture ended; restored previous setting');
+                    }, ms);
+                } catch (e) {
+                    console.error('captureSiteErrorsFor failed', e);
+                    alert('Failed to enable capture: ' + e.message);
+                }
+            };
+        
+            window.exportAggregatedErrors = () => {
+                if (debugConsole) debugConsole.exportAggregates();
+            };
+        
+            window.clearAggregatedErrors = () => {
+                if (debugConsole) debugConsole.clearAggregates();
+                setTimeout(() => debugConsole.updateDebugDisplay(), 100);
+            };
         }
 
         loadDebugSetting() {
@@ -58,6 +143,26 @@
         saveDebugSetting(enabled) {
             localStorage.setItem('bms_debug_enabled', enabled.toString());
             this.enabled = enabled;
+        }
+
+        loadVerboseSetting() {
+            const saved = localStorage.getItem('bms_debug_verbose');
+            return saved === 'true';
+        }
+
+        saveVerboseSetting(enabled) {
+            localStorage.setItem('bms_debug_verbose', enabled.toString());
+            this.verbose = enabled;
+        }
+
+        loadAutoExportSetting() {
+            const saved = localStorage.getItem('bms_debug_autoexport');
+            return saved === 'true';
+        }
+
+        saveAutoExportSetting(enabled) {
+            localStorage.setItem('bms_debug_autoexport', enabled.toString());
+            this.autoExportOnError = enabled;
         }
 
         log(level, message, data = null) {
@@ -137,6 +242,35 @@
             this.info('Debug logs exported', { filename: a.download, logCount: this.logs.length });
         }
 
+        // Aggregate errors by signature for quick triage
+        recordAggregate(signature, entry) {
+            try {
+                if (!signature) signature = 'unknown';
+                const agg = this.aggregates[signature] || { count: 0, lastSeen: null, examples: [] };
+                agg.count += 1;
+                agg.lastSeen = new Date().toISOString();
+                if (agg.examples.length < 5) {
+                    agg.examples.push(entry);
+                }
+                this.aggregates[signature] = agg;
+            } catch (e) {
+                console.warn('Failed to record aggregate', e);
+            }
+        }
+
+        // Export aggregated error report
+        exportAggregates() {
+            const blob = new Blob([JSON.stringify({ version: this.version, aggregates: this.aggregates, exportTime: new Date().toISOString() }, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = `bms_error_aggregates_${new Date().toISOString().split('T')[0]}.json`; a.click(); URL.revokeObjectURL(url);
+            this.info('Aggregates exported', { file: a.download });
+        }
+
+        clearAggregates() {
+            this.aggregates = {};
+            this.info('Aggregates cleared');
+        }
+
         clearLogs() {
             this.logs = [];
             this.updateDebugDisplay();
@@ -159,6 +293,19 @@
             }
 
             let debugHTML = '';
+            // Optionally show aggregated summary at top
+            try {
+                const aggKeys = Object.keys(this.aggregates || {}).sort((a,b) => (this.aggregates[b].count||0) - (this.aggregates[a].count||0));
+                if (aggKeys.length > 0) {
+                    debugHTML += `<div style="padding:6px;margin-bottom:6px;border-radius:4px;background:rgba(0,0,0,0.25);font-size:12px;">
+                        <div style="font-weight:bold;color:#ffc107;margin-bottom:4px;">Error Groups (most frequent)</div>`;
+                    aggKeys.slice(0,5).forEach(k => {
+                        const a = this.aggregates[k];
+                        debugHTML += `<div style="color:#e9ecef;font-size:11px;margin-bottom:2px;">${a.count} × ${k} <span style="color:#6c757d;font-size:10px;margin-left:6px;">last: ${a.lastSeen}</span></div>`;
+                    });
+                    debugHTML += `</div>`;
+                }
+            } catch (e) { console.warn('Failed to render aggregates', e); }
             recentLogs.forEach(log => {
                 const levelColor = {
                     'error': '#dc3545',
@@ -306,6 +453,18 @@ User Agent: ${navigator.userAgent}
         if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
         if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
         return 'a few seconds ago';
+    };
+
+    // Parse ISO 8601 duration like PT14H53M51.565S -> milliseconds
+    const parseISODurationToMs = (iso) => {
+        if (!iso || typeof iso !== 'string') return null;
+        // Expect format starting with 'PT'
+        const match = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?/);
+        if (!match) return null;
+        const hours = parseInt(match[1] || '0', 10);
+        const minutes = parseInt(match[2] || '0', 10);
+        const seconds = parseFloat(match[3] || '0');
+        return Math.round(((hours * 60 + minutes) * 60 + seconds) * 1000);
     };
 
     // Server Monitor Class
@@ -845,10 +1004,17 @@ User Agent: ${navigator.userAgent}
                     if (!existing.previousNames.includes(existing.currentName)) {
                         existing.previousNames.push(existing.currentName);
                     }
+                    const oldName = existing.currentName;
                     existing.currentName = playerName;
                     existing.nameChanged = true;
                     existing.lastNameChange = now;
                     needsUpdate = true;
+                    try {
+                        // Record a name-change event in activity log
+                        this.logNameChange(playerId, oldName, playerName);
+                    } catch (e) {
+                        console.warn('Failed to log name change', e);
+                    }
                 }
                 existing.lastSeen = now;
             } else {
@@ -960,6 +1126,11 @@ User Agent: ${navigator.userAgent}
                                     style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                     title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
                                 ${isSaved ? 'Saved' : 'Save'}
+                            </button>
+                            <button onclick="showNameHistory('${player.id}')"
+                                    style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View name history">
+                                History
                             </button>
                         </div>
                     </div>
@@ -1073,6 +1244,27 @@ User Agent: ${navigator.userAgent}
             }, 500);
         }
 
+        // Log a name change event with old and new names
+        logNameChange(playerId, oldName, newName) {
+            const entry = {
+                timestamp: Date.now(),
+                playerId,
+                playerName: newName,
+                oldName: oldName,
+                action: 'name_changed',
+                serverName: currentServerName,
+                time: new Date().toLocaleString()
+            };
+            this.activityLog.push(entry);
+            this.saveActivityLog();
+
+            // Debounce activity display updates to reduce lag
+            clearTimeout(this.activityUpdateTimeout);
+            this.activityUpdateTimeout = setTimeout(() => {
+                this.updateActivityDisplay();
+            }, 300);
+        }
+
         showAlert(playerName, action) {
             const alertDiv = document.createElement('div');
             alertDiv.style.cssText = `
@@ -1126,20 +1318,74 @@ User Agent: ${navigator.userAgent}
                     await audioContext.resume();
                 }
                 
+                const choice = (this.settings && this.settings.soundChoice) ? this.settings.soundChoice : 'osc_sine';
                 const oscillator = audioContext.createOscillator();
                 const gainNode = audioContext.createGain();
-                
+
                 oscillator.connect(gainNode);
                 gainNode.connect(audioContext.destination);
-                
-                oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
-                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-                
-                oscillator.start(audioContext.currentTime);
-                oscillator.stop(audioContext.currentTime + 0.5);
-                
-                console.log('Alert sound played successfully');
+
+                // Default params
+                let now = audioContext.currentTime;
+                gainNode.gain.setValueAtTime(0.0, now);
+
+                if (choice.startsWith('osc_')) {
+                    // Simple oscillator types
+                    const type = choice.split('_')[1] || 'sine';
+                    oscillator.type = type;
+                    oscillator.frequency.setValueAtTime(880, now);
+                    gainNode.gain.linearRampToValueAtTime(0.3, now + 0.01);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+                    oscillator.start(now);
+                    oscillator.stop(now + 0.45);
+                } else if (choice === 'short_burst') {
+                    // Two short beeps
+                    oscillator.type = 'square';
+                    oscillator.frequency.setValueAtTime(880, now);
+                    gainNode.gain.linearRampToValueAtTime(0.35, now + 0.005);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+                    oscillator.start(now);
+                    oscillator.stop(now + 0.12);
+                    // second beep
+                    const osc2 = audioContext.createOscillator();
+                    const gain2 = audioContext.createGain();
+                    osc2.type = 'square';
+                    osc2.frequency.setValueAtTime(660, now + 0.18);
+                    gain2.gain.setValueAtTime(0.0, now + 0.18);
+                    osc2.connect(gain2);
+                    gain2.connect(audioContext.destination);
+                    gain2.linearRampToValueAtTime(0.25, now + 0.185);
+                    gain2.exponentialRampToValueAtTime(0.001, now + 0.35);
+                    osc2.start(now + 0.18);
+                    osc2.stop(now + 0.35);
+                } else if (choice === 'long_wobble') {
+                    // Frequency modulation wobble
+                    oscillator.type = 'sine';
+                    const mod = audioContext.createOscillator();
+                    const modGain = audioContext.createGain();
+                    mod.frequency.setValueAtTime(4, now);
+                    modGain.gain.setValueAtTime(40, now);
+                    mod.connect(modGain);
+                    modGain.connect(oscillator.frequency);
+
+                    oscillator.frequency.setValueAtTime(720, now);
+                    gainNode.gain.linearRampToValueAtTime(0.25, now + 0.02);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 1.4);
+                    oscillator.start(now);
+                    mod.start(now);
+                    oscillator.stop(now + 1.4);
+                    mod.stop(now + 1.4);
+                } else {
+                    // Fallback to a short sine
+                    oscillator.type = 'sine';
+                    oscillator.frequency.setValueAtTime(800, now);
+                    gainNode.gain.linearRampToValueAtTime(0.25, now + 0.01);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+                    oscillator.start(now);
+                    oscillator.stop(now + 0.5);
+                }
+
+                console.log('Alert sound played successfully (choice:', choice, ')');
             } catch (e) {
                 console.log('Could not play alert sound:', e);
                 // Fallback: try to use a simple beep
@@ -1237,12 +1483,25 @@ User Agent: ${navigator.userAgent}
                             const playerId = playerLink.split('/players/')[1]?.split('/')[0];
                             
                             if (playerId && playerName) {
+                                // Try to extract session duration from a time element (BattleMetrics shows durations as PT...)
+                                let sessionMs = null;
+                                try {
+                                    const timeEl = row.querySelector('time[datetime]');
+                                    if (timeEl) {
+                                        const dt = timeEl.getAttribute('datetime');
+                                        sessionMs = parseISODurationToMs(dt);
+                                    }
+                                } catch (e) {
+                                    console.warn('Failed to parse session duration', e);
+                                }
+
                                 newPlayerList.set(playerId, {
                                     name: playerName,
                                     id: playerId,
-                                    lastSeen: Date.now()
+                                    lastSeen: Date.now(),
+                                    sessionMs: sessionMs
                                 });
-                                
+
                                 // Add to database (batched, skip display updates during initial load)
                                 this.addToDatabase(playerId, playerName, isInitialLoad);
                             }
@@ -1276,12 +1535,25 @@ User Agent: ${navigator.userAgent}
                             const playerId = playerLink.split('/players/')[1]?.split('/')[0];
                             
                             if (playerId && playerName) {
+                                // Try to extract session duration from a time element in the row
+                                let sessionMs = null;
+                                try {
+                                    const timeEl = row.querySelector('time[datetime]');
+                                    if (timeEl) {
+                                        const dt = timeEl.getAttribute('datetime');
+                                        sessionMs = parseISODurationToMs(dt);
+                                    }
+                                } catch (e) {
+                                    console.warn('Failed to parse session duration', e);
+                                }
+
                                 newPlayerList.set(playerId, {
                                     name: playerName,
                                     id: playerId,
-                                    lastSeen: Date.now()
+                                    lastSeen: Date.now(),
+                                    sessionMs: sessionMs
                                 });
-                                
+
                                 // Add to database
                                 this.addToDatabase(playerId, playerName, isInitialLoad);
                             }
@@ -1436,6 +1708,28 @@ User Agent: ${navigator.userAgent}
                 playerLink.textContent = player.name;
                 
                 playerInfo.appendChild(playerLink);
+
+                // Show session playtime if available (format hours with one decimal, or minutes if <1h)
+                try {
+                    if (player && typeof player.sessionMs === 'number' && player.sessionMs !== null) {
+                        const ms = player.sessionMs;
+                        let sessionText = '';
+                        if (ms >= 3600000) {
+                            const hrs = ms / 3600000;
+                            sessionText = `${hrs.toFixed(1)}h`;
+                        } else {
+                            const mins = Math.round(ms / 60000);
+                            sessionText = `${mins}m`;
+                        }
+
+                        const sessionSpan = document.createElement('div');
+                        sessionSpan.style.cssText = 'color: #6c757d; font-size: 11px; margin-top: 3px;';
+                        sessionSpan.textContent = `Session: ${sessionText}`;
+                        playerInfo.appendChild(sessionSpan);
+                    }
+                } catch (e) {
+                    // Ignore non-critical display errors
+                }
                 
                 if (isAlerted) {
                     const alertSpan = document.createElement('span');
@@ -1495,15 +1789,32 @@ User Agent: ${navigator.userAgent}
             let activityHTML = '';
             recentActivity.forEach(entry => {
                 const timeAgo = toRelativeTime(entry.timestamp);
-                const actionColor = entry.action === 'joined' ? '#28a745' : '#dc3545';
                 const hasAlert = this.alerts[entry.playerId];
                 const isSaved = this.savedPlayers[entry.playerId];
-                
+
+                // Friendly message text
+                let mainText = '';
+                let actionColor = '#6c757d';
+
+                if (entry.action === 'joined') {
+                    mainText = `${entry.playerName} joined the game`;
+                    actionColor = '#28a745';
+                } else if (entry.action === 'left') {
+                    mainText = `${entry.playerName} left the game`;
+                    actionColor = '#dc3545';
+                } else if (entry.action === 'name_changed') {
+                    const oldLabel = entry.oldName || 'previous name';
+                    mainText = `${oldLabel} → ${entry.playerName} changed name`;
+                    actionColor = '#ffc107';
+                } else {
+                    mainText = `${entry.playerName} ${entry.action}`;
+                }
+
                 activityHTML += `
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
                         <div style="flex: 1;">
                             <div style="color: ${actionColor}; font-weight: bold;">
-                                ${entry.playerName} ${entry.action} the game
+                                ${mainText}
                                 ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
                                 ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
                             </div>
@@ -1525,6 +1836,7 @@ User Agent: ${navigator.userAgent}
                                     title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
                                 ${isSaved ? 'Saved' : 'Save'}
                             </button>
+                            ${entry.action === 'name_changed' && (serverMonitor && serverMonitor.playerDatabase && serverMonitor.playerDatabase[entry.playerId] && serverMonitor.playerDatabase[entry.playerId].previousNames && serverMonitor.playerDatabase[entry.playerId].previousNames.length > 0) ? `<button onclick="showNameHistory('${entry.playerId}')" style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;">History</button>` : ''}
                         </div>
                     </div>
                 `;
@@ -1710,6 +2022,11 @@ User Agent: ${navigator.userAgent}
                                     title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
                                 ${hasAlert ? 'Remove' : 'Add Alert'}
                             </button>
+                            <button onclick="showNameHistory('${playerId}')" 
+                                    style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View name history">
+                                History
+                            </button>
                             <button onclick="removeSavedPlayer('${playerId}')" 
                                     style="background: #6c757d; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                     title="Remove from Saved">
@@ -1790,6 +2107,11 @@ User Agent: ${navigator.userAgent}
                                     style="background: #17a2b8; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                     title="View Profile">
                                 Profile
+                            </button>
+                            <button onclick="showNameHistory('${alert.playerId}')" 
+                                    style="background: #6f42c1; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="View name history">
+                                History
                             </button>
                         </div>
                     </div>
@@ -2077,7 +2399,7 @@ User Agent: ${navigator.userAgent}
                         <option value="all">All Players</option>
                         <option value="online">Online Only</option>
                         <option value="offline">Offline Only</option>
-                        <option value="recent-left">Recently Left (Last Hour)</option>
+                        <option value="recent-left">Recently Left (Last 3 Hours)</option>
                         <option value="name-changed">Name Changed</option>
                     </select>
                     <button onclick="clearDatabaseFilter()" 
@@ -2137,6 +2459,16 @@ User Agent: ${navigator.userAgent}
                                    onchange="toggleSoundAlerts(this.checked)" style="margin-right: 8px;">
                             Enable sound alerts
                         </label>
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                            <label style="color:inherit; margin:0;">Sound:</label>
+                            <select id="sound-select" onchange="changeSoundChoice(this.value)" style="padding:4px; border-radius:4px; background: rgba(255,255,255,0.05); color: white; border: none;">
+                                <option value="osc_sine">Sine beep</option>
+                                <option value="osc_square">Square beep</option>
+                                <option value="osc_triangle">Triangle beep</option>
+                                <option value="short_burst">Short burst</option>
+                                <option value="long_wobble">Long wobble</option>
+                            </select>
+                        </div>
                         <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
                             <input type="checkbox" id="repeat-alerts" ${serverMonitor?.settings.repeatAlerts !== false ? 'checked' : ''} 
                                    onchange="toggleRepeatAlerts(this.checked)" style="margin-right: 8px;">
@@ -2147,6 +2479,22 @@ User Agent: ${navigator.userAgent}
                                    onchange="toggleDebugMode(this.checked)" style="margin-right: 8px;">
                             Enable debug console mode
                         </label>
+                                <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
+                                    <input type="checkbox" id="auto-check-updates" 
+                                           onchange="toggleAutoCheckUpdates(this.checked)" style="margin-right: 8px;">
+                                    Auto-check for updates
+                                </label>
+                                <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
+                                    <input type="checkbox" id="auto-install-updates" 
+                                           onchange="toggleAutoInstallUpdates(this.checked)" style="margin-right: 8px;">
+                                    Auto-install updates when available
+                                </label>
+                                <div style="margin-top:6px; display:flex; gap:6px;">
+                                    <button onclick="checkForUpdatesNow()"
+                                            style="background: #007bff; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                                        Check for updates
+                                    </button>
+                                </div>
                         <button onclick="testSound()" 
                                 style="background: #28a745; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-top: 5px;">
                             Test Sound
@@ -2179,6 +2527,10 @@ User Agent: ${navigator.userAgent}
                                 style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                             Reset All Servers
                         </button>
+                        <button id="reset-defaults-btn" onclick="resetDefaultSettings()" 
+                                style="background: #343a40; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Reset To Default Settings
+                        </button>
                     </div>
                 </div>
             </div>
@@ -2206,6 +2558,14 @@ User Agent: ${navigator.userAgent}
                                 style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                             Export JSON
                         </button>
+                        <button onclick="exportAggregatedErrors()" 
+                                style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Export Groups
+                        </button>
+                        <button onclick="clearAggregatedErrors()" 
+                                style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Clear Groups
+                        </button>
                         <button onclick="clearDebugLogs()" 
                                 style="background: #ffc107; color: black; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                             Clear Logs
@@ -2219,8 +2579,12 @@ User Agent: ${navigator.userAgent}
 
             <!-- Version Info -->
             <div style="text-align: center; padding: 10px; border-top: 1px solid rgba(255,255,255,0.2); margin-top: 10px;">
-                <div style="font-size: 11px; color: #6c757d; opacity: 0.8;">
+                <div style="font-size: 11px; color: #6c757d; opacity: 0.9; margin-bottom:6px;">
                     BattleMetrics Server Monitor v1.0.1
+                </div>
+                <div style="font-size: 12px;">
+                    <a href="https://discord.gg/bEPn9UH9Xw" target="_blank" rel="noopener" style="color:#5865F2; font-weight:600; text-decoration:none; margin-right:12px;">Discord</a>
+                    <a href="https://jlaiii.github.io/BattleMetrics-Rust-Analytics/" target="_blank" rel="noopener" style="color:#8892BF; font-weight:600; text-decoration:none;">GitHub</a>
                 </div>
             </div>
         `;
@@ -2248,6 +2612,42 @@ User Agent: ${navigator.userAgent}
                 
                 // Always try to refresh display
                 debugConsole.updateDebugDisplay();
+                // Initialize update checkboxes
+                const autoCheckCb = document.getElementById('auto-check-updates');
+                const autoInstallCb = document.getElementById('auto-install-updates');
+                if (autoCheckCb) autoCheckCb.checked = loadAutoCheckSetting();
+                if (autoInstallCb) autoInstallCb.checked = loadAutoInstallSetting();
+                // initialize sound select
+                try {
+                    const soundSelect = document.getElementById('sound-select');
+                    if (soundSelect && serverMonitor) {
+                        const choice = (serverMonitor.settings && serverMonitor.settings.soundChoice) ? serverMonitor.settings.soundChoice : 'osc_sine';
+                        soundSelect.value = choice;
+                    }
+                } catch (e) {
+                    console.warn('Could not initialize sound select', e);
+                }
+                // Attach safe blur handlers to prevent page-level onblur handlers from firing
+                try {
+                    const playerSearch = document.getElementById('player-search');
+                    if (playerSearch) {
+                        // Use capture to intercept before page handlers
+                        playerSearch.addEventListener('blur', (ev) => {
+                            try { ev.stopImmediatePropagation(); } catch (e) {}
+                            setTimeout(() => { if (!playerSearch.value) { activePlayerSearch = ''; } }, 200);
+                        }, true);
+                    }
+
+                    const dbSearch = document.getElementById('database-search');
+                    if (dbSearch) {
+                        dbSearch.addEventListener('blur', (ev) => {
+                            try { ev.stopImmediatePropagation(); } catch (e) {}
+                            setTimeout(() => { if (!dbSearch.value) { activeDatabaseSearch = ''; if (serverMonitor) serverMonitor.updateDatabaseDisplay(); } }, 200);
+                        }, true);
+                    }
+                } catch (e) {
+                    console.warn('Failed to attach safe blur handlers', e);
+                }
             }
         }, 500);
     };
@@ -2493,7 +2893,7 @@ User Agent: ${navigator.userAgent}
         debugConsole.debug('Current alerts', serverMonitor.alerts);
         
         const isAlerted = serverMonitor.alerts[playerId];
-        debugConsole.debug('Player is currently alerted: ' + isAlerted);
+        debugConsole.debug('Player is currently alerted:', !!isAlerted, isAlerted);
         
         try {
             if (isAlerted) {
@@ -2605,6 +3005,27 @@ User Agent: ${navigator.userAgent}
             serverMonitor.soundEnabled = enabled;
             serverMonitor.settings.soundEnabled = enabled;
             serverMonitor.saveSettings();
+        }
+    };
+
+    window.changeSoundChoice = (value) => {
+        if (serverMonitor) {
+            serverMonitor.settings = serverMonitor.settings || {};
+            serverMonitor.settings.soundChoice = value;
+            serverMonitor.saveSettings();
+        }
+    };
+
+    window.testSound = () => {
+        if (serverMonitor) {
+            // Play the currently selected sound once
+            try {
+                serverMonitor.playAlertSound();
+            } catch (e) {
+                alert('Could not play test sound: ' + e.message);
+            }
+        } else {
+            alert('Server monitor not initialized yet.');
         }
     };
 
@@ -2859,6 +3280,111 @@ User Agent: ${navigator.userAgent}
         }
     };
 
+    // Show name history modal for a player
+    window.showNameHistory = (playerId) => {
+        if (!serverMonitor) return;
+        const dbPlayer = serverMonitor.playerDatabase[playerId];
+        if (!dbPlayer) {
+            alert('No player history found for ID: ' + playerId);
+            return;
+        }
+
+        // Remove existing modal if present
+        const existing = document.getElementById('bms-name-history-modal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'bms-name-history-modal';
+        modal.style.cssText = 'position: fixed; left: 0; top: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 20000; display:flex; align-items:center; justify-content:center;';
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background: #2c3e50; color: white; padding: 16px; border-radius: 8px; width: 420px; max-height: 80vh; overflow-y:auto; box-shadow: 0 8px 30px rgba(0,0,0,0.6);';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;';
+        header.innerHTML = `<div style="font-weight:bold; font-size:16px;">Name History</div>`;
+
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'Close';
+        closeBtn.style.cssText = 'background:#6c757d; color:white; border:none; padding:6px 8px; border-radius:4px; cursor:pointer;';
+        closeBtn.onclick = () => modal.remove();
+        header.appendChild(closeBtn);
+
+        box.appendChild(header);
+
+        const info = document.createElement('div');
+        info.style.cssText = 'font-size:13px; margin-bottom:8px;';
+        info.innerHTML = `
+            <div><strong>Current:</strong> ${dbPlayer.currentName}</div>
+            <div><strong>Original:</strong> ${dbPlayer.originalName || dbPlayer.currentName}</div>
+            <div><strong>ID:</strong> ${dbPlayer.id}</div>
+            <div><strong>First seen:</strong> ${dbPlayer.firstSeen ? new Date(dbPlayer.firstSeen).toLocaleString() : 'N/A'}</div>
+            <div><strong>Last seen:</strong> ${dbPlayer.lastSeen ? new Date(dbPlayer.lastSeen).toLocaleString() : 'N/A'}</div>
+        `;
+        box.appendChild(info);
+
+        const listTitle = document.createElement('div');
+        listTitle.style.cssText = 'font-weight:bold; margin-bottom:6px;';
+        listTitle.textContent = 'Previous names (most recent first):';
+        box.appendChild(listTitle);
+
+        const list = document.createElement('div');
+        list.style.cssText = 'font-size:13px; color:#e9ecef; margin-bottom:10px;';
+        const prev = dbPlayer.previousNames && dbPlayer.previousNames.length ? dbPlayer.previousNames.slice().reverse() : [];
+        if (prev.length === 0) {
+            list.innerHTML = '<div style="opacity:0.7;">No previous names recorded</div>';
+        } else {
+            prev.forEach((n, idx) => {
+                const d = document.createElement('div');
+                d.style.cssText = 'padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.03);';
+                d.textContent = `${n}`;
+                list.appendChild(d);
+            });
+        }
+        box.appendChild(list);
+
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex; gap:8px; justify-content:flex-end;';
+
+        const resetBtn = document.createElement('button');
+        resetBtn.textContent = 'Reset History';
+        resetBtn.style.cssText = 'background:#dc3545; color:white; border:none; padding:6px 8px; border-radius:4px; cursor:pointer;';
+        resetBtn.onclick = () => {
+            if (confirm('Reset name history for ' + dbPlayer.currentName + '? This cannot be undone.')) {
+                window.resetNameHistory(playerId);
+                modal.remove();
+            }
+        };
+
+        const exportBtn = document.createElement('button');
+        exportBtn.textContent = 'Export';
+        exportBtn.style.cssText = 'background:#17a2b8; color:white; border:none; padding:6px 8px; border-radius:4px; cursor:pointer;';
+        exportBtn.onclick = () => {
+            const data = JSON.stringify(dbPlayer, null, 2);
+            navigator.clipboard.writeText(data).then(() => alert('Player history copied to clipboard'));
+        };
+
+        actions.appendChild(exportBtn);
+        actions.appendChild(resetBtn);
+        box.appendChild(actions);
+
+        modal.appendChild(box);
+        document.body.appendChild(modal);
+    };
+
+    window.resetNameHistory = (playerId) => {
+        if (!serverMonitor) return;
+        const dbPlayer = serverMonitor.playerDatabase[playerId];
+        if (!dbPlayer) return;
+        dbPlayer.previousNames = [];
+        dbPlayer.nameChanged = false;
+        serverMonitor.savePlayerDatabase();
+        serverMonitor.updateDatabaseDisplay();
+        serverMonitor.updateSavedPlayersDisplay();
+        serverMonitor.updateAlertDisplay();
+        alert('Name history reset for ' + (dbPlayer.currentName || playerId));
+    };
+
     // Filter functions
     window.filterActivity = (filterType) => {
         if (!serverMonitor) return;
@@ -2944,7 +3470,7 @@ User Agent: ${navigator.userAgent}
         if (!databaseDiv) return;
 
         let filteredPlayers = Object.values(serverMonitor.playerDatabase);
-        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+        const threeHoursAgo = Date.now() - (3 * 60 * 60 * 1000);
 
         switch (filterType) {
             case 'online':
@@ -2954,9 +3480,9 @@ User Agent: ${navigator.userAgent}
                 filteredPlayers = filteredPlayers.filter(player => !serverMonitor.currentPlayers.has(player.id));
                 break;
             case 'recent-left':
-                // Players who were seen recently but are now offline
+                // Players who were seen recently but are now offline (last 3 hours)
                 filteredPlayers = filteredPlayers.filter(player => 
-                    !serverMonitor.currentPlayers.has(player.id) && player.lastSeen >= oneHourAgo
+                    !serverMonitor.currentPlayers.has(player.id) && player.lastSeen >= threeHoursAgo
                 );
                 break;
             case 'name-changed':
@@ -3027,6 +3553,111 @@ User Agent: ${navigator.userAgent}
             debugConsole.info('Debug mode disabled by user');
         }
     };
+
+    window.toggleVerboseDebug = (enabled) => {
+        console.log('[Debug Console] toggleVerboseDebug called with:', enabled);
+        if (debugConsole) {
+            debugConsole.saveVerboseSetting(enabled);
+            debugConsole.info('Verbose debug set to ' + enabled);
+        }
+    };
+
+    window.toggleAutoExportDebug = (enabled) => {
+        console.log('[Debug Console] toggleAutoExportDebug called with:', enabled);
+        if (debugConsole) {
+            debugConsole.saveAutoExportSetting(enabled);
+            debugConsole.info('Auto-export on error set to ' + enabled);
+        }
+    };
+
+    // Update check handlers
+    window.toggleAutoCheckUpdates = (enabled) => {
+        saveAutoCheckSetting(!!enabled);
+        if (debugConsole) debugConsole.info('Auto-check updates: ' + !!enabled);
+    };
+
+    window.toggleAutoInstallUpdates = (enabled) => {
+        saveAutoInstallSetting(!!enabled);
+        if (debugConsole) debugConsole.info('Auto-install updates: ' + !!enabled);
+    };
+
+    window.checkForUpdatesNow = async () => {
+        try {
+            await checkForUpdatesAvailable(true, true);
+            if (updateAvailable) {
+                showUpdateToast(`Update available v${updateAvailableVersion} — Click to install`, true, updateAvailableVersion);
+            }
+        } catch (e) {
+            console.error('Update check failed', e);
+            showUpdateToast('Update check failed: ' + (e && e.message ? e.message : ''), false);
+        }
+    };
+
+    window.openInstall = () => {
+        try {
+            window.open(INSTALL_URL, '_blank');
+        } catch (e) {
+            console.error('Failed to open install URL', e);
+        }
+    };
+
+    // Global error handlers to capture runtime errors into debug console
+    window.addEventListener('error', (ev) => {
+        try {
+            const msg = ev.message || 'Window error';
+            const src = ev.filename ? `${ev.filename}:${ev.lineno}:${ev.colno}` : '';
+            const err = ev.error || {};
+            // Filter out noisy third-party/site errors unless verbose debug is enabled
+            const isSiteError = ev.filename && ev.filename.includes('battlemetrics.com');
+            if (isSiteError && debugConsole && !debugConsole.verbose) {
+                // Do not log site errors in normal mode to reduce noise
+                return;
+            }
+
+            // Build signature for aggregation
+            let signature = msg;
+            try {
+                if (ev.filename) signature += ` @ ${ev.filename}`;
+            } catch (e) {}
+
+            const data = { stack: err.stack || null, error: err, src };
+            if (debugConsole) {
+                debugConsole.error(`Uncaught error: ${msg} ${src}`, data);
+                debugConsole.recordAggregate(signature, { timestamp: new Date().toISOString(), message: msg, src, stack: err.stack || null });
+                if (debugConsole.autoExportOnError) {
+                    debugConsole.exportLogs();
+                }
+            }
+        } catch (e) {
+            console.error('Error in global error handler', e);
+        }
+    });
+
+    window.addEventListener('unhandledrejection', (ev) => {
+        try {
+            const reason = ev.reason || {};
+            // Filter noisy rejections from site scripts unless verbose enabled
+            const reasonStr = (reason && reason.stack) ? String(reason.stack) : (reason && reason.message) ? String(reason.message) : '';
+            const isSiteRejection = reasonStr.includes('battlemetrics.com') || reasonStr.includes('cdn.battlemetrics.com');
+            if (isSiteRejection && debugConsole && !debugConsole.verbose) {
+                return;
+            }
+            // Create a signature for aggregation
+            let sig = 'UnhandledRejection';
+            try {
+                if (reason && reason.message) sig += `: ${reason.message}`;
+            } catch (e) {}
+            if (debugConsole) {
+                debugConsole.error('Unhandled Promise Rejection', reason);
+                debugConsole.recordAggregate(sig, { timestamp: new Date().toISOString(), reason: reasonStr || reason });
+                if (debugConsole.autoExportOnError) {
+                    debugConsole.exportLogs();
+                }
+            }
+        } catch (e) {
+            console.error('Error in unhandledrejection handler', e);
+        }
+    });
 
     window.exportDebugLogs = () => {
         debugConsole.exportLogs();
@@ -3117,6 +3748,56 @@ User Agent: ${navigator.userAgent}
         console.log('debug-console-list exists:', !!document.getElementById('debug-console-list'));
         console.log('debug-stats exists:', !!document.getElementById('debug-stats'));
         console.log('============================');
+    };
+
+    // Reset settings to defaults (both global and server-specific where applicable)
+    window.resetDefaultSettings = () => {
+        if (!confirm('Reset all settings to defaults? This will clear debug and update prefs for this browser.')) return;
+
+        // Global settings
+        localStorage.removeItem('bms_debug_enabled');
+        localStorage.removeItem('bms_debug_verbose');
+        localStorage.removeItem('bms_debug_autoexport');
+        localStorage.removeItem('bms_auto_check_updates');
+        localStorage.removeItem('bms_auto_install_updates');
+        localStorage.removeItem(MENU_VISIBLE_KEY);
+
+        // Server-specific settings if serverMonitor exists
+        if (typeof ALERT_SETTINGS_KEY !== 'undefined' && ALERT_SETTINGS_KEY) {
+            localStorage.removeItem(ALERT_SETTINGS_KEY);
+        }
+
+        // Update UI and runtime objects
+        if (debugConsole) {
+            debugConsole.saveDebugSetting(false);
+            debugConsole.saveVerboseSetting(false);
+            debugConsole.saveAutoExportSetting(false);
+        }
+
+        if (serverMonitor) {
+            serverMonitor.settings = {};
+            serverMonitor.saveSettings();
+            // refresh displays
+            serverMonitor.updateDatabaseDisplay();
+            serverMonitor.updateSavedPlayersDisplay();
+            serverMonitor.updateAlertDisplay();
+        }
+
+        // Update settings UI checkboxes
+        const debugCb = document.getElementById('debug-mode');
+        const autoCheckCb = document.getElementById('auto-check-updates');
+        const autoInstallCb = document.getElementById('auto-install-updates');
+        if (debugCb) debugCb.checked = false;
+        if (autoCheckCb) {
+            autoCheckCb.checked = true; // default to ON
+            saveAutoCheckSetting(true);
+        }
+        if (autoInstallCb) {
+            autoInstallCb.checked = true; // default to ON
+            saveAutoInstallSetting(true);
+        }
+
+        alert('Settings reset to defaults.');
     };
 
     // Global function to check UI elements
@@ -3572,6 +4253,108 @@ User Agent: ${navigator.userAgent}
         }
     }, 3000);
 
+    // Periodic update checker
+    const checkForUpdatesAvailable = async (force = false, showNoUpdateToast = false) => {
+        const enabled = loadAutoCheckSetting() || force;
+        if (!enabled) return;
+        try {
+            const resp = await fetch(GITHUB_RAW_URL, { cache: 'no-cache' });
+            if (!resp || !resp.ok) return;
+            const text = await resp.text();
+            const m = text.match(/@version\s+([^\s\n\r]+)/i) || text.match(/const\s+SCRIPT_VERSION\s*=\s*['"]([^'"]+)['"]/i);
+            if (m && m[1]) {
+                const remoteVer = m[1].trim();
+                if (compareVersions(remoteVer, SCRIPT_VERSION) === 1) {
+                    updateAvailable = true;
+                    updateAvailableVersion = remoteVer;
+                    // Show banner in monitor
+                    const monitor = document.getElementById(SERVER_MONITOR_ID);
+                    if (monitor) {
+                        let banner = document.getElementById('bms-update-banner');
+                        if (!banner) {
+                            banner = document.createElement('div');
+                            banner.id = 'bms-update-banner';
+                            banner.style.cssText = 'background:#ffc107;color:#000;padding:8px;border-radius:6px;margin-bottom:10px;cursor:pointer;font-weight:bold;text-align:center;';
+                            banner.onclick = () => window.openInstall();
+                            monitor.insertAdjacentElement('afterbegin', banner);
+                        }
+                        banner.textContent = `Update available v${remoteVer} — Click to install`;
+                    }
+
+                    // Auto-install if enabled (throttle to once per 24 hours)
+                    if (loadAutoInstallSetting()) {
+                        try {
+                            const last = loadLastAutoInstall() || 0;
+                            const now = Date.now();
+                            const dayMs = 24 * 60 * 60 * 1000;
+                            if (now - last > dayMs) {
+                                if (debugConsole) debugConsole.info('Auto-install is enabled — opening install URL');
+                                window.openInstall();
+                                saveLastAutoInstall(now);
+                            } else {
+                                if (debugConsole) debugConsole.info('Auto-install skipped (opened recently)');
+                            }
+                        } catch (e) {
+                            if (debugConsole) debugConsole.warn('Auto-install throttle check failed', e);
+                            try { window.openInstall(); } catch (e2) {}
+                        }
+                    }
+                    // Show toast to user for forced checks or always for discovered update
+                    showUpdateToast(`Update available v${remoteVer} — Click to install`, true, remoteVer);
+                } else {
+                    updateAvailable = false;
+                    updateAvailableVersion = null;
+                    const old = document.getElementById('bms-update-banner');
+                    if (old) old.remove();
+                    // Only show "no updates found" when explicitly requested to show (e.g., user clicked Check)
+                    if (force && showNoUpdateToast) {
+                        showUpdateToast(`No updates found — current v${SCRIPT_VERSION}`, false, SCRIPT_VERSION);
+                    }
+                }
+            }
+        } catch (e) {
+            if (debugConsole) debugConsole.warn('Update check failed', e);
+        }
+    };
+
+    // Initial check and periodic checks (6 hours)
+    // Initial auto-check (do not show "no updates" toast on page load)
+    setTimeout(() => checkForUpdatesAvailable(true, false), 2000);
+    // Periodic auto-checks (quiet unless update available)
+    setInterval(() => checkForUpdatesAvailable(false, false), 6 * 60 * 60 * 1000);
+
+    // Toast notification for updates
+    const showUpdateToast = (message, isUpdate = false, version = '') => {
+        try {
+            // Remove existing toast
+            const existing = document.getElementById('bms-update-toast');
+            if (existing) existing.remove();
+
+            const toast = document.createElement('div');
+            toast.id = 'bms-update-toast';
+            toast.style.cssText = `position: fixed; right: 20px; bottom: 20px; z-index: 20000; background: ${isUpdate ? '#ffc107' : '#6c757d'}; color: ${isUpdate ? '#000' : '#fff'}; padding: 12px 14px; border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,0.35); cursor: pointer; font-weight:700;`;
+            toast.textContent = message;
+
+            toast.onclick = () => {
+                if (isUpdate) {
+                    window.openInstall();
+                }
+                toast.remove();
+            };
+
+            document.body.appendChild(toast);
+
+            // Auto-hide after 8 seconds if not update; leave longer for update (15s)
+            const timeout = isUpdate ? 15000 : 8000;
+            setTimeout(() => {
+                const t = document.getElementById('bms-update-toast');
+                if (t) t.remove();
+            }, timeout);
+        } catch (e) {
+            console.error('Failed to show update toast', e);
+        }
+    };
+
     // SIMPLE BRUTE FORCE APPROACH - Just reload if on server page without UI
     // Auto-initialization functionality (similar to player script)
     let lastURL = window.location.href;
@@ -3613,8 +4396,8 @@ User Agent: ${navigator.userAgent}
             return;
         }
         
-        // Extract server ID from URL
-        const serverMatch = currentURL.match(/\/servers\/rust\/(\d+)/);
+        // Extract server ID from URL (match any game slug, not just 'rust')
+        const serverMatch = currentURL.match(/\/servers\/[^\/]+\/(\d+)/);
         if (!serverMatch) {
             return;
         }
