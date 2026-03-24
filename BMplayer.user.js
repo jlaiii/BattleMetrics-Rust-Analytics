@@ -297,6 +297,13 @@ User Agent: ${navigator.userAgent}
         if (_bma_onerror) return; // already attached
         _bma_onerror = (event) => {
             try {
+                // Filter out noisy obfuscated/site errors that are not actionable for this userscript
+                const message = event && (event.message || (event.error && event.error.message)) || '';
+                if (typeof message === 'string' && /window\[\"__f__/i.test(message)) {
+                    // ignore this known noisy site error
+                    return;
+                }
+
                 const err = event.error || event.message || event;
                 debugConsole.error('Uncaught error', err && err.stack ? err.stack : err);
             } catch (e) {
@@ -305,6 +312,11 @@ User Agent: ${navigator.userAgent}
         };
         _bma_unhandled = (ev) => {
             try {
+                const reason = ev && (ev.reason || ev.detail || ev);
+                const reasonMsg = reason && (reason.message || String(reason)) || '';
+                if (typeof reasonMsg === 'string' && /window\[\"__f__/i.test(reasonMsg)) {
+                    return;
+                }
                 debugConsole.error('Unhandled promise rejection', ev.reason || ev);
             } catch (e) {
                 // swallow
