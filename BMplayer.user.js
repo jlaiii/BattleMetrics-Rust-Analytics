@@ -313,11 +313,22 @@ User Agent: ${navigator.userAgent}
         _bma_unhandled = (ev) => {
             try {
                 const reason = ev && (ev.reason || ev.detail || ev);
+                // Ignore empty-object rejections (common noisy site behavior)
+                const isEmptyObject = reason && typeof reason === 'object' && !Array.isArray(reason) && Object.keys(reason).length === 0;
+                if (isEmptyObject) return;
+
                 const reasonMsg = reason && (reason.message || String(reason)) || '';
                 if (typeof reasonMsg === 'string' && /window\[\"__f__/i.test(reasonMsg)) {
                     return;
                 }
-                debugConsole.error('Unhandled promise rejection', ev.reason || ev);
+
+                // Log structured reason where possible
+                try {
+                    debugConsole.error('Unhandled promise rejection', reason);
+                } catch (logErr) {
+                    // Fallback to safe string
+                    debugConsole.error('Unhandled promise rejection', String(reason));
+                }
             } catch (e) {
                 // swallow
             }

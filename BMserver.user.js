@@ -3741,9 +3741,13 @@ User Agent: ${navigator.userAgent}
     window.addEventListener('unhandledrejection', (ev) => {
         try {
             const reason = ev.reason || {};
+            // Ignore empty-object rejections (common noisy site behavior)
+            const isEmptyObject = reason && typeof reason === 'object' && !Array.isArray(reason) && Object.keys(reason).length === 0;
+            if (isEmptyObject) return;
+
             // Filter noisy rejections from site scripts unless verbose enabled
             const reasonStr = (reason && reason.stack) ? String(reason.stack) : (reason && reason.message) ? String(reason.message) : '';
-            const isSiteRejection = reasonStr.includes('battlemetrics.com') || reasonStr.includes('cdn.battlemetrics.com');
+            const isSiteRejection = reasonStr.includes('battlemetrics.com') || reasonStr.includes('cdn.battlemetrics.com') || /window\[\"__f__/i.test(reasonStr);
             if (isSiteRejection && debugConsole && !debugConsole.verbose) {
                 return;
             }
