@@ -363,7 +363,7 @@ User Agent: ${navigator.userAgent}
     const debugConsole = new DebugConsole();
     
     // Log script startup
-    debugConsole.info('BattleMetrics Server Monitor v1.0.2 loaded', {
+    debugConsole.info(`BattleMetrics Server Monitor v${SCRIPT_VERSION} loaded`, {
         url: window.location.href,
         userAgent: navigator.userAgent,
         timestamp: new Date().toISOString()
@@ -2589,7 +2589,7 @@ User Agent: ${navigator.userAgent}
             <!-- Version Info -->
             <div style="text-align: center; padding: 10px; border-top: 1px solid rgba(255,255,255,0.2); margin-top: 10px;">
                 <div style="font-size: 11px; color: #6c757d; opacity: 0.9; margin-bottom:6px;">
-                    BattleMetrics Server Monitor v1.0.2
+                    ${`BattleMetrics Server Monitor v${SCRIPT_VERSION}`}
                 </div>
                 <div style="font-size: 12px;">
                     <a href="https://discord.gg/bEPn9UH9Xw" target="_blank" rel="noopener" style="color:#5865F2; font-weight:600; text-decoration:none; margin-right:12px;">Discord</a>
