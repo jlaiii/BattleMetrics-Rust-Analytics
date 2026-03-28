@@ -45,7 +45,7 @@
     };
 
     // Update/check settings (global)
-    const SCRIPT_VERSION = '1.0.5';
+    const SCRIPT_VERSION = '1.0.6';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
     const AUTO_CHECK_KEY = 'bms_auto_check_updates';
