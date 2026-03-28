@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Server Monitor & Alert System
 // @namespace    http://tampermonkey.net/
-// @version      1.0.5
+// @version      1.0.6
 // @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/servers/*
@@ -29,7 +29,8 @@
     let PLAYER_DATABASE_KEY = '';
     let POPULATION_HISTORY_KEY = '';
     let LAST_PLAYER_STATE_KEY = '';
-    
+    let SESSIONS_KEY = '';
+
     // Function to initialize server-specific keys
     const initializeStorageKeys = (serverID) => {
         ALERTS_KEY = `bms_player_alerts_${serverID}`;
@@ -40,6 +41,7 @@
         PLAYER_DATABASE_KEY = `bms_player_database_${serverID}`;
         POPULATION_HISTORY_KEY = `bms_population_history_${serverID}`;
         LAST_PLAYER_STATE_KEY = `bms_last_player_state_${serverID}`;
+        SESSIONS_KEY = `bms_script_sessions_${serverID}`;
     };
 
     // Update/check settings (global)
@@ -261,39 +263,37 @@
 
         clearLogs() {
             this.logs = [];
+            this.aggregates = {};
             this.updateDebugDisplay();
-            this.info('Debug logs cleared');
+            this.updateDebugStats();
+        }
+
+        updateDebugStats() {
+            const statsDiv = document.getElementById('debug-stats');
+            if (!statsDiv) return;
+            const stats = this.getStats();
+            const oldestTime = stats.oldestLog ? new Date(stats.oldestLog).toLocaleString() : 'N/A';
+            statsDiv.innerHTML = `Total Logs: ${stats.totalLogs} | Errors: <span style="color:#dc3545">${stats.errorCount}</span> | Warnings: <span style="color:#ffc107">${stats.warnCount}</span> | Info: ${stats.infoCount} | Debug: ${stats.debugCount}${stats.oldestLog ? `<br>Oldest: ${oldestTime}` : ''}`;
         }
 
         updateDebugDisplay() {
             const debugList = document.getElementById('debug-console-list');
-            if (!debugList) {
-                console.log('[Debug Console] Element debug-console-list not found');
-                return;
-            }
+            if (!debugList) return;
+
+            this.updateDebugStats();
 
             const recentLogs = this.logs.slice(-50).reverse(); // Show last 50 logs
-            console.log('[Debug Console] Updating display with', recentLogs.length, 'logs');
-            
+
             if (recentLogs.length === 0) {
-                debugList.innerHTML = '<div style="opacity: 0.7; font-style: italic; color: #6c757d;">No debug logs available</div>';
+                debugList.innerHTML = '<div style="opacity: 0.7; font-style: italic; color: #6c757d; padding: 4px;">No debug logs</div>';
                 return;
             }
 
+            const esc = (s) => String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
             let debugHTML = '';
-            // Optionally show aggregated summary at top
-            try {
-                const aggKeys = Object.keys(this.aggregates || {}).sort((a,b) => (this.aggregates[b].count||0) - (this.aggregates[a].count||0));
-                if (aggKeys.length > 0) {
-                    debugHTML += `<div style="padding:6px;margin-bottom:6px;border-radius:4px;background:rgba(0,0,0,0.25);font-size:12px;">
-                        <div style="font-weight:bold;color:#ffc107;margin-bottom:4px;">Error Groups (most frequent)</div>`;
-                    aggKeys.slice(0,5).forEach(k => {
-                        const a = this.aggregates[k];
-                        debugHTML += `<div style="color:#e9ecef;font-size:11px;margin-bottom:2px;">${a.count} × ${k} <span style="color:#6c757d;font-size:10px;margin-left:6px;">last: ${a.lastSeen}</span></div>`;
-                    });
-                    debugHTML += `</div>`;
-                }
-            } catch (e) { console.warn('Failed to render aggregates', e); }
             recentLogs.forEach(log => {
                 const levelColor = {
                     'error': '#dc3545',
@@ -303,22 +303,16 @@
                 }[log.level] || '#6c757d';
 
                 const time = new Date(log.timestamp).toLocaleTimeString();
-                
-                debugHTML += `
-                    <div style="padding: 5px; margin-bottom: 3px; border-left: 3px solid ${levelColor}; background: rgba(255,255,255,0.05); font-size: 11px;">
-                        <div style="color: ${levelColor}; font-weight: bold;">
-                            [${log.level.toUpperCase()}] ${time}
-                        </div>
-                        <div style="color: white; margin: 2px 0;">
-                            ${log.message}
-                        </div>
-                        ${log.data ? `<div style="color: #6c757d; font-family: monospace; font-size: 10px; max-height: 100px; overflow-y: auto; white-space: pre-wrap;">${log.data}</div>` : ''}
-                    </div>
-                `;
+
+                debugHTML += `<div style="padding: 4px 6px; margin-bottom: 2px; border-left: 3px solid ${levelColor}; background: rgba(255,255,255,0.04); font-size: 11px;">`
+                    + `<span style="color:${levelColor}; font-weight:bold;">[${esc(log.level.toUpperCase())}]</span>`
+                    + ` <span style="color:#6c757d;">${esc(time)}</span>`
+                    + ` <span style="color:#e9ecef;">${esc(log.message)}</span>`
+                    + (log.data ? `<div style="color:#6c757d; font-family:monospace; font-size:10px; margin-top:2px; max-height:80px; overflow-y:auto; white-space:pre-wrap;">${esc(log.data)}</div>` : '')
+                    + `</div>`;
             });
 
             debugList.innerHTML = debugHTML;
-            console.log('[Debug Console] Display updated with HTML length:', debugHTML.length);
         }
 
         getStats() {
@@ -599,15 +593,33 @@ User Agent: ${navigator.userAgent}
             this.saveRecentAlerts();
         }
 
+        acknowledgeAllAlerts() {
+            Object.keys(this.recentAlerts).forEach(alertId => {
+                this.recentAlerts[alertId].acknowledged = true;
+            });
+            this.saveRecentAlerts();
+            this.stopAlertReminders();
+            this.updateRecentAlertsDisplay();
+            setTimeout(() => this.reorderSectionsIfNeeded(), 100);
+        }
+
+        clearAllRecentAlerts() {
+            this.recentAlerts = {};
+            this.saveRecentAlerts();
+            this.stopAlertReminders();
+            this.updateRecentAlertsDisplay();
+            setTimeout(() => this.reorderSectionsIfNeeded(), 100);
+        }
+
         startAlertReminders() {
             if (alertReminderInterval || this.settings.repeatAlerts === false) return;
-            
+            const interval = this.settings.repeatIntervalMs || 60000;
             alertReminderInterval = setInterval(() => {
                 const unacknowledged = Object.values(this.recentAlerts).filter(alert => !alert.acknowledged);
                 if (unacknowledged.length > 0 && this.soundEnabled && this.settings.repeatAlerts !== false) {
                     this.playAlertSound();
                 }
-            }, 60000); // Every 1 minute
+            }, interval);
         }
 
         stopAlertReminders() {
@@ -858,81 +870,67 @@ User Agent: ${navigator.userAgent}
         calculatePopulationStats() {
             const now = Date.now();
             const twoHoursAgo = now - (2 * 60 * 60 * 1000);
-            const oneHourAgo = now - (60 * 60 * 1000);
-            
-            // Get current population - try to use actual UI count first
+            const oneHourAgo  = now - (60 * 60 * 1000);
+
+            // Get current population
             const actualPopulation = this.getActualPopulationFromUI();
             if (actualPopulation !== null) {
                 currentPopulation = actualPopulation;
-                
-                // Sync our tracked players if there's a significant discrepancy
-                if (Math.abs(actualPopulation - this.currentPlayers.size) > 2) {
-                    console.log(`Large population discrepancy detected: Tracked=${this.currentPlayers.size}, Actual=${actualPopulation}`);
-                    // Don't clear the player list, but note the discrepancy
-                }
             } else {
                 currentPopulation = this.currentPlayers.size;
             }
-            
-            // Get last 2 hours of data for better prediction
-            const recentHistory = this.populationHistory.filter(entry => entry.timestamp >= twoHoursAgo);
-            
-            console.log(`Population stats calculation: Current=${currentPopulation}, History entries=${recentHistory.length}, Total history=${this.populationHistory.length}`);
-            
+
+            const recentHistory = this.populationHistory.filter(e => e.timestamp >= twoHoursAgo);
+
             if (recentHistory.length < 2) {
-                // Not enough data, predict same as current
-                lastHourChange = 0;
-                predictedNextHour = currentPopulation;
-                console.log('Not enough historical data for prediction');
+                lastHourChange      = 0;
+                predictedNextHour   = currentPopulation;
                 return;
             }
-            
-            // Find population from one hour ago
-            const oneHourAgoEntry = recentHistory
-                .filter(entry => entry.timestamp >= oneHourAgo - 300000) // 5 min buffer
+
+            // ── Last-hour change ────────────────────────────────────────────
+            const oneHourEntry = recentHistory
+                .filter(e => Math.abs(e.timestamp - oneHourAgo) < 10 * 60 * 1000)
                 .sort((a, b) => Math.abs(a.timestamp - oneHourAgo) - Math.abs(b.timestamp - oneHourAgo))[0];
-            
-            if (oneHourAgoEntry) {
-                lastHourChange = currentPopulation - oneHourAgoEntry.count;
-            } else {
-                lastHourChange = 0;
-            }
-            
-            // Advanced prediction using weighted average of recent trends
-            const weights = [];
-            const changes = [];
-            
-            // Calculate 15-minute interval changes over last 2 hours
-            for (let i = 15; i <= 120; i += 15) {
-                const timeAgo = now - (i * 60 * 1000);
-                const entry = recentHistory
-                    .filter(e => e.timestamp >= timeAgo - 120000) // 2 min buffer
-                    .sort((a, b) => Math.abs(a.timestamp - timeAgo) - Math.abs(b.timestamp - timeAgo))[0];
-                
-                if (entry) {
-                    const change = currentPopulation - entry.count;
-                    const intervalHours = i / 60;
-                    const hourlyRate = change / intervalHours;
-                    
-                    // Weight recent changes more heavily
-                    const weight = Math.pow(0.8, (i / 15) - 1); // Exponential decay
-                    weights.push(weight);
-                    changes.push(hourlyRate);
-                }
-            }
-            
-            if (changes.length > 0) {
-                // Calculate weighted average of hourly rates
-                const totalWeight = weights.reduce((sum, w) => sum + w, 0);
-                const weightedAverage = changes.reduce((sum, change, i) => sum + (change * weights[i]), 0) / totalWeight;
-                
-                // Apply some smoothing to avoid wild predictions
-                const smoothedPrediction = weightedAverage * 0.7 + (lastHourChange * 0.3);
-                predictedNextHour = Math.max(0, Math.round(currentPopulation + smoothedPrediction));
-            } else {
-                // Fallback to simple trend
-                predictedNextHour = Math.max(0, Math.round(currentPopulation + lastHourChange));
-            }
+            lastHourChange = oneHourEntry ? currentPopulation - oneHourEntry.count : 0;
+
+            // ── Linear regression over all 2-hour data points ───────────────
+            // Include the live reading as the most recent point.
+            const points = [...recentHistory, { timestamp: now, count: currentPopulation }];
+
+            // Express time in hours from the oldest point (keeps numbers small)
+            const t0   = points[0].timestamp;
+            const toHr = ms => (ms - t0) / 3600000;
+            const xs   = points.map(p => toHr(p.timestamp));
+            const ys   = points.map(p => p.count);
+            const n    = points.length;
+
+            const sumX  = xs.reduce((s, x) => s + x, 0);
+            const sumY  = ys.reduce((s, y) => s + y, 0);
+            const sumXY = xs.reduce((s, x, i) => s + x * ys[i], 0);
+            const sumXX = xs.reduce((s, x) => s + x * x, 0);
+            const denom = n * sumXX - sumX * sumX;
+
+            // slope = players/hour from the regression line
+            const slope     = Math.abs(denom) > 0.0001 ? (n * sumXY - sumX * sumY) / denom : 0;
+            const intercept = (sumY - slope * sumX) / n;
+
+            // Raw prediction: where the regression line sits 1 hour from now
+            const currentX     = toHr(now);
+            const rawPredicted = intercept + slope * (currentX + 1);
+            const rawDelta     = rawPredicted - currentPopulation;
+
+            // ── Damping ─────────────────────────────────────────────────────
+            // Pull the projected change 50% back toward 0 so short-term spikes
+            // don't get carried all the way forward.
+            const dampedDelta = rawDelta * 0.5;
+
+            // Hard-cap the change at ±30% of current population (realistic hourly swing).
+            // Floor the cap at ±8 so small servers still get a meaningful range.
+            const maxSwing    = Math.max(8, Math.round(currentPopulation * 0.30));
+            const clampedDelta = Math.max(-maxSwing, Math.min(maxSwing, dampedDelta));
+
+            predictedNextHour = Math.max(0, Math.round(currentPopulation + clampedDelta));
         }
 
         updatePopulationDisplay() {
@@ -946,6 +944,20 @@ User Agent: ${navigator.userAgent}
             const historyCount = this.populationHistory.length;
             const oldestEntry = this.populationHistory.length > 0 ? 
                 new Date(this.populationHistory[0].timestamp).toLocaleTimeString() : 'None';
+
+            // Unique players detected per time window (distinct playerIds in activity log)
+            const _now = Date.now();
+            const uniqueIn = (ms) => {
+                const cutoff = _now - ms;
+                const ids = new Set();
+                for (const e of this.activityLog) {
+                    if (e.timestamp >= cutoff && e.playerId) ids.add(e.playerId);
+                }
+                return ids.size;
+            };
+            const u1h  = uniqueIn(1  * 60 * 60 * 1000);
+            const u3h  = uniqueIn(3  * 60 * 60 * 1000);
+            const u6h  = uniqueIn(6  * 60 * 60 * 1000);
             
             popDisplay.innerHTML = `
                 <div style="background: rgba(111, 66, 193, 0.1); padding: 10px; border-radius: 5px; margin-bottom: 10px;">
@@ -957,7 +969,7 @@ User Agent: ${navigator.userAgent}
                             Updated: ${lastUpdated}
                         </div>
                     </div>
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                         <div>
                             <div style="color: white; font-size: 18px; font-weight: bold;">
                                 ${currentPopulation} players
@@ -975,6 +987,23 @@ User Agent: ${navigator.userAgent}
                             </div>
                             <div style="color: #17a2b8; font-size: 14px; font-weight: bold;">
                                 ${predictedNextHour} players
+                            </div>
+                        </div>
+                    </div>
+                    <div style="border-top: 1px solid rgba(111,66,193,0.3); padding-top: 7px;">
+                        <div style="color: #6f42c1; font-size: 11px; font-weight: bold; margin-bottom: 5px;">Unique Players</div>
+                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; text-align: center;">
+                            <div style="background: rgba(255,255,255,0.05); border-radius: 3px; padding: 4px 2px;">
+                                <div style="color: white; font-size: 14px; font-weight: bold;">${u1h}</div>
+                                <div style="color: #6c757d; font-size: 9px;">1h</div>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.05); border-radius: 3px; padding: 4px 2px;">
+                                <div style="color: white; font-size: 14px; font-weight: bold;">${u3h}</div>
+                                <div style="color: #6c757d; font-size: 9px;">3h</div>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.05); border-radius: 3px; padding: 4px 2px;">
+                                <div style="color: white; font-size: 14px; font-weight: bold;">${u6h}</div>
+                                <div style="color: #6c757d; font-size: 9px;">6h</div>
                             </div>
                         </div>
                     </div>
@@ -1001,23 +1030,37 @@ User Agent: ${navigator.userAgent}
                 if (existing) {
                     // If name changed, record previous name history (avoid duplicates)
                         if (!namesEqual(existing.currentName, playerName)) {
-                            existing.previousNames = existing.previousNames || [];
-                            const existingNormalized = normalizeName(existing.currentName);
-                            // Avoid duplicate previous names (case/whitespace-insensitive)
-                            if (existing.currentName && !existing.previousNames.some(n => normalizeName(n).toLowerCase() === existingNormalized.toLowerCase())) {
-                                existing.previousNames.push(existing.currentName);
+                            // Silently resolve "Unknown Player" placeholder set by manual add —
+                            // don't log a name-change event and don't push it to previousNames
+                            const isPlaceholder = existing.manuallyAdded && existing.currentName === 'Unknown Player';
+                            if (isPlaceholder) {
+                                existing.currentName = playerName;
+                                if (!existing.originalName || existing.originalName === 'Unknown Player') {
+                                    existing.originalName = playerName;
+                                }
+                                existing.manuallyAdded = false; // resolved
+                            } else {
+                                existing.previousNames = existing.previousNames || [];
+                                const existingNormalized = normalizeName(existing.currentName);
+                                // Avoid duplicate previous names (case/whitespace-insensitive)
+                                // Support both legacy plain strings and new timestamped objects
+                                const nameStr = e => (typeof e === 'string' ? e : (e && e.name) || '');
+                                if (existing.currentName && !existing.previousNames.some(n => normalizeName(nameStr(n)).toLowerCase() === existingNormalized.toLowerCase())) {
+                                    existing.previousNames.push({ name: existing.currentName, changedAt: now, changedAtISO: new Date(now).toISOString() });
+                                }
+                                const oldName = existing.currentName;
+                                existing.currentName = playerName;
+                                existing.nameChanged = true;
+                                existing.lastNameChange = now;
+                                // Record name change in activity log (so it appears in All Activity)
+                                try {
+                                    this.logNameChange(playerId, oldName, playerName);
+                                } catch (e) {
+                                    console.warn('Failed to log name change', e);
+                                }
                             }
-                            const oldName = existing.currentName;
-                            existing.currentName = playerName;
-                            existing.nameChanged = true;
-                            existing.lastNameChange = now;
-                        // Record name change in activity log (so it appears in All Activity)
-                        try {
-                            this.logNameChange(playerId, oldName, playerName);
-                        } catch (e) {
-                            console.warn('Failed to log name change', e);
-                        }
                     }
+                    existing.seenCount = (existing.seenCount || 0) + 1;
                     existing.lastSeen = now;
                 } else {
                     // New player - always add to database
@@ -1028,7 +1071,8 @@ User Agent: ${navigator.userAgent}
                         firstSeen: now,
                         lastSeen: now,
                         nameChanged: false,
-                        previousNames: []
+                        previousNames: [],
+                        seenCount: 1
                     };
                 }
 
@@ -1061,6 +1105,15 @@ User Agent: ${navigator.userAgent}
             const databaseSection = document.getElementById('player-database-list').parentElement;
             if (databaseSection && databaseSection.style.display === 'none') return;
 
+            // Respect the active filter — if one is set, delegate to filterDatabase
+            // so background updates don't blow away the user's chosen filter.
+            const filterSelect = document.getElementById('database-filter');
+            const activeFilter = filterSelect ? filterSelect.value : 'all';
+            if (activeFilter && activeFilter !== 'all') {
+                window.filterDatabase(activeFilter);
+                return;
+            }
+
             // Sort by online status first, then by last seen
             const players = Object.values(this.playerDatabase)
                 .sort((a, b) => {
@@ -1092,8 +1145,10 @@ User Agent: ${navigator.userAgent}
                 const isOnline = this.currentPlayers.has(player.id);
                 
                 let nameDisplay = player.currentName;
+                // Support both legacy strings and new timestamped objects in previousNames
+                const _nameStr = e => (typeof e === 'string' ? e : (e && e.name) || '');
                 if (player.nameChanged && player.previousNames.length > 0) {
-                    nameDisplay = `${player.currentName} (was: ${player.previousNames[player.previousNames.length - 1]})`;
+                    nameDisplay = `${player.currentName} (was: ${_nameStr(player.previousNames[player.previousNames.length - 1])})`;
                 }
                 
                 const onlineStatus = isOnline ? 
@@ -1109,7 +1164,7 @@ User Agent: ${navigator.userAgent}
                                 ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
                             </div>
                             <div style="opacity: 0.7; font-size: 10px;">
-                                ID: ${player.id} | Last seen: ${lastSeenTime}
+                                ID: ${player.id} | Last seen: ${lastSeenTime} | Detections: ${player.seenCount || 1}×
                             </div>
                             ${player.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
                         </div>
@@ -1160,8 +1215,9 @@ User Agent: ${navigator.userAgent}
                 
                 // Only check previous names if we haven't found a match yet
                 if (player.previousNames && player.previousNames.length > 0) {
-                    for (const name of player.previousNames) {
-                        if (name.toLowerCase().includes(lowerQuery)) {
+                    for (const entry of player.previousNames) {
+                        const n = typeof entry === 'string' ? entry : (entry && entry.name) || '';
+                        if (n.toLowerCase().includes(lowerQuery)) {
                             results.push(player);
                             break; // Found match, no need to check other previous names
                         }
@@ -1218,13 +1274,20 @@ User Agent: ${navigator.userAgent}
         }
 
         logActivity(playerName, playerId, action) {
+            const now = Date.now();
+            const d = new Date(now);
             const entry = {
-                timestamp: Date.now(),
+                timestamp: now,
+                utcISO: d.toISOString(),
+                dayOfWeek: d.getDay(),        // 0=Sun … 6=Sat
+                hourUTC: d.getUTCHours(),     // 0-23 UTC hour
+                hourLocal: d.getHours(),      // 0-23 local hour
                 playerName,
                 playerId,
                 action, // 'joined' or 'left'
                 serverName: currentServerName,
-                time: new Date().toLocaleString()
+                serverID: currentServerID,
+                time: d.toLocaleString()
             };
             this.activityLog.push(entry);
             this.saveActivityLog();
@@ -1248,14 +1311,21 @@ User Agent: ${navigator.userAgent}
 
         // Log a name change event with old and new names
         logNameChange(playerId, oldName, newName) {
+            const now = Date.now();
+            const d = new Date(now);
             const entry = {
-                timestamp: Date.now(),
+                timestamp: now,
+                utcISO: d.toISOString(),
+                dayOfWeek: d.getDay(),
+                hourUTC: d.getUTCHours(),
+                hourLocal: d.getHours(),
                 playerId,
                 playerName: newName,
                 oldName: oldName,
                 action: 'name_changed',
                 serverName: currentServerName,
-                time: new Date().toLocaleString()
+                serverID: currentServerID,
+                time: d.toLocaleString()
             };
             this.activityLog.push(entry);
             this.saveActivityLog();
@@ -1780,79 +1850,10 @@ User Agent: ${navigator.userAgent}
                 return;
             }
 
-            // Check if there's an active filter and apply it
-            const filterSelect = document.getElementById('activity-filter');
-            if (filterSelect && filterSelect.value !== 'all') {
-                // Use the filter function to maintain current filter
-                window.filterActivity(filterSelect.value);
-                return;
+            // Delegate to unified filter renderer (handles both action + time filters)
+            if (window.applyActivityFilters) {
+                window.applyActivityFilters();
             }
-
-            // Default behavior - show all activity
-            const recentActivity = this.activityLog.slice(-100).reverse();
-            
-            if (recentActivity.length === 0) {
-                activityDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No recent activity</div>';
-                return;
-            }
-
-            let activityHTML = '';
-            recentActivity.forEach(entry => {
-                const timeAgo = toRelativeTime(entry.timestamp);
-                const hasAlert = this.alerts[entry.playerId];
-                const isSaved = this.savedPlayers[entry.playerId];
-
-                // Friendly message text
-                let mainText = '';
-                let actionColor = '#6c757d';
-
-                if (entry.action === 'joined') {
-                    mainText = `${entry.playerName} joined the game`;
-                    actionColor = '#28a745';
-                } else if (entry.action === 'left') {
-                    mainText = `${entry.playerName} left the game`;
-                    actionColor = '#dc3545';
-                } else if (entry.action === 'name_changed') {
-                    const oldLabel = entry.oldName || 'previous name';
-                    mainText = `${oldLabel} → ${entry.playerName} changed name`;
-                    actionColor = '#ffc107';
-                } else {
-                    mainText = `${entry.playerName} ${entry.action}`;
-                }
-
-                activityHTML += `
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
-                        <div style="flex: 1;">
-                            <div style="color: ${actionColor}; font-weight: bold;">
-                                ${mainText}
-                                ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
-                                ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
-                            </div>
-                            <div style="opacity: 0.7; font-size: 11px;">${timeAgo} - ${entry.time} - ID: ${entry.playerId}</div>
-                        </div>
-                        <div style="display: flex; gap: 3px;">
-                            <button onclick="window.open('https://www.battlemetrics.com/players/${entry.playerId}', '_blank')" 
-                                    style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                    title="View Profile">
-                                Profile
-                            </button>
-                            <button onclick="togglePlayerAlert('${entry.playerName}', '${entry.playerId}')" 
-                                    style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                    title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
-                                ${hasAlert ? 'Remove' : 'Add Alert'}
-                            </button>
-                            <button onclick="savePlayer('${entry.playerName}', '${entry.playerId}')" 
-                                    style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                    title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
-                                ${isSaved ? 'Saved' : 'Save'}
-                            </button>
-                            ${entry.action === 'name_changed' && (serverMonitor && serverMonitor.playerDatabase && serverMonitor.playerDatabase[entry.playerId] && serverMonitor.playerDatabase[entry.playerId].previousNames && serverMonitor.playerDatabase[entry.playerId].previousNames.length > 0) ? `<button onclick="showNameHistory('${entry.playerId}')" style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;">History</button>` : ''}
-                        </div>
-                    </div>
-                `;
-            });
-
-            activityDiv.innerHTML = activityHTML;
         }
 
         updateAlertCount() {
@@ -1923,6 +1924,10 @@ User Agent: ${navigator.userAgent}
                         '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
                         '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
                     
+                    const lastSeenLine = (!isOnline && dbPlayer && dbPlayer.lastSeen)
+                        ? `<div style="opacity: 0.7; font-size: 10px; margin-top: 1px;">Last seen: ${toRelativeTime(dbPlayer.lastSeen)}</div>`
+                        : '';
+
                     alertHTML += `
                         <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(255, 193, 7, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#ffc107'};">
                             <div style="flex: 1;">
@@ -1936,6 +1941,7 @@ User Agent: ${navigator.userAgent}
                                 <div style="opacity: 0.7; font-size: 10px;">
                                     Added: ${addedDate} | ID: ${playerId}
                                 </div>
+                                ${lastSeenLine}
                                 ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
                             </div>
                             <div style="display: flex; gap: 3px;">
@@ -2006,6 +2012,10 @@ User Agent: ${navigator.userAgent}
                     '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
                     '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
                 
+                const lastSeenLine = (!isOnline && dbPlayer && dbPlayer.lastSeen)
+                    ? `<div style="opacity: 0.7; font-size: 10px; margin-top: 1px;">Last seen: ${toRelativeTime(dbPlayer.lastSeen)}</div>`
+                    : '';
+
                 savedHTML += `
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(108, 117, 125, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#6c757d'};">
                         <div style="flex: 1;">
@@ -2019,6 +2029,7 @@ User Agent: ${navigator.userAgent}
                             <div style="opacity: 0.7; font-size: 10px;">
                                 Saved: ${savedDate} | ID: ${playerId}
                             </div>
+                            ${lastSeenLine}
                             ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
                         </div>
                         <div style="display: flex; gap: 3px;">
@@ -2406,13 +2417,30 @@ User Agent: ${navigator.userAgent}
                         ✕
                     </button>
                 </div>
+                <!-- Manual Add Player -->
+                <div style="margin-bottom: 8px;">
+                    <div style="display: flex; gap: 5px; align-items: center;">
+                        <input type="text" id="manual-add-id" placeholder="Player ID (required)" 
+                               style="flex: 1; padding: 4px 6px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;"
+                               onkeydown="if(event.key==='Enter') manuallyAddPlayer()">
+                        <input type="text" id="manual-add-nickname" placeholder="Nickname (optional)" 
+                               style="flex: 1; padding: 4px 6px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;"
+                               onkeydown="if(event.key==='Enter') manuallyAddPlayer()">
+                        <label style="display: flex; align-items: center; gap: 3px; font-size: 10px; white-space: nowrap; cursor: pointer;">
+                            <input type="checkbox" id="manual-add-alert" style="cursor: pointer;"> Alert
+                        </label>
+                        <button onclick="manuallyAddPlayer()" 
+                                style="background: #6f42c1; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; white-space: nowrap;">
+                            + Add
+                        </button>
+                    </div>
+                </div>
                 <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center;">
                     <select id="database-filter" onchange="filterDatabase(this.value)" 
                             style="padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
                         <option value="all">All Players</option>
                         <option value="online">Online Only</option>
                         <option value="offline">Offline Only</option>
-                        <option value="recent-left">Recently Left (Last 3 Hours)</option>
                         <option value="name-changed">Name Changed</option>
                     </select>
                     <button onclick="clearDatabaseFilter()" 
@@ -2428,8 +2456,22 @@ User Agent: ${navigator.userAgent}
 
             <!-- Recent Alerts -->
             <div id="recent-alerts-section" style="background: rgba(220, 53, 69, 0.2); border: 1px solid #dc3545; border-radius: 5px; padding: 12px; margin-bottom: 15px;">
-                <div style="font-size: 14px; font-weight: bold; color: #dc3545; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('recent-alerts')">
-                    Recent Alerts (<span id="recent-alerts-count">0</span>) <span id="recentalerts-toggle">▼</span>
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                    <div style="font-size: 14px; font-weight: bold; color: #dc3545; cursor: pointer; flex: 1;" onclick="toggleSection('recent-alerts')">
+                        Recent Alerts (<span id="recent-alerts-count">0</span>) <span id="recentalerts-toggle">▼</span>
+                    </div>
+                    <div style="display:flex; gap:4px;">
+                        <button onclick="acknowledgeAllRecentAlerts()" 
+                                style="background: #28a745; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; white-space: nowrap;"
+                                title="Mark all alerts as acknowledged">
+                            ✓ Acknowledge All
+                        </button>
+                        <button onclick="clearAllRecentAlerts(this)" 
+                                style="background: #dc3545; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; white-space: nowrap;"
+                                title="Remove all recent alerts">
+                            ✕ Clear All
+                        </button>
+                    </div>
                 </div>
                 <div id="recent-alerts-list" style="max-height: 200px; overflow-y: auto;">
                     No recent alerts
@@ -2441,23 +2483,37 @@ User Agent: ${navigator.userAgent}
                 <div style="font-size: 14px; font-weight: bold; color: #17a2b8; margin-bottom: 8px; cursor: pointer;" onclick="toggleSection('recent-activity')">
                     All Activity (<span id="activity-count">0</span>) <span id="activity-toggle">▼</span>
                 </div>
-                <div style="margin-bottom: 8px; display: flex; gap: 5px; align-items: center;" id="activity-filters">
-                    <input type="text" id="activity-search" placeholder="Search activity (name, id, action)..." 
-                           style="flex: 1; padding: 5px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 12px;"
-                           oninput="handleActivitySearch(this.value)">
-                    <select id="activity-filter" onchange="filterActivity(this.value)" 
-                            style="padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
-                        <option value="all">All Activity</option>
-                        <option value="joined">Joined Only</option>
-                        <option value="left">Left Only</option>
-                        <option value="name_changed">Name Changes Only</option>
-                        <option value="recent">Most Recent (Last Hour)</option>
-                    </select>
-                    <button onclick="clearActivityFilter()" 
-                            style="background: #6c757d; color: white; border: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;"
-                            title="Clear Filter">
-                        Clear
-                    </button>
+                <div style="margin-bottom: 8px;" id="activity-filters">
+                    <div style="display: flex; gap: 5px; align-items: center; margin-bottom: 5px;">
+                        <input type="text" id="activity-search" placeholder="Search activity (name, id, action)..." 
+                               style="flex: 1; padding: 5px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 12px;"
+                               oninput="handleActivitySearch(this.value)">
+                        <button onclick="clearActivityFilter()" 
+                                style="background: #6c757d; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;"
+                                title="Clear all filters">
+                            Clear
+                        </button>
+                    </div>
+                    <div style="display: flex; gap: 5px; align-items: center;">
+                        <select id="activity-filter" onchange="applyActivityFilters()" 
+                                style="flex: 1; padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
+                            <option value="all">All Actions</option>
+                            <option value="joined">Joined Only</option>
+                            <option value="left">Left Only</option>
+                            <option value="name_changed">Name Changes</option>
+                            <option value="new_players">New Players</option>
+                        </select>
+                        <select id="activity-time-filter" onchange="applyActivityFilters()" 
+                                style="flex: 1; padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
+                            <option value="all">All Time</option>
+                            <option value="1h">Last Hour</option>
+                            <option value="3h">Last 3 Hours</option>
+                            <option value="6h">Last 6 Hours</option>
+                            <option value="24h">Last 24 Hours</option>
+                            <option value="7d">Last 7 Days</option>
+                        </select>
+                    </div>
+                    <div id="activity-result-count" style="font-size: 10px; color: #6c757d; margin-top: 4px;"></div>
                 </div>
                 <div id="recent-activity-list" style="max-height: 300px; overflow-y: auto; display: block;">
                     No recent activity
@@ -2486,11 +2542,34 @@ User Agent: ${navigator.userAgent}
                                 <option value="long_wobble">Long wobble</option>
                             </select>
                         </div>
-                        <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
+                        <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 4px;">
                             <input type="checkbox" id="repeat-alerts" ${serverMonitor?.settings.repeatAlerts !== false ? 'checked' : ''} 
                                    onchange="toggleRepeatAlerts(this.checked)" style="margin-right: 8px;">
-                            Repeat alert sounds (every 1 min)
+                            Repeat alert sounds
                         </label>
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; padding-left:24px;">
+                            <label style="color:inherit; margin:0; font-size:11px;">Every:</label>
+                            <select id="repeat-interval" onchange="changeRepeatInterval(this.value)" style="padding:4px; border-radius:4px; background: rgba(255,255,255,0.05); color: white; border: none; font-size:11px;">
+                                <option value="2000" ${(serverMonitor?.settings.repeatIntervalMs||60000)==2000?'selected':''}>2 seconds</option>
+                                <option value="10000" ${(serverMonitor?.settings.repeatIntervalMs||60000)==10000?'selected':''}>10 seconds</option>
+                                <option value="30000" ${(serverMonitor?.settings.repeatIntervalMs||60000)==30000?'selected':''}>30 seconds</option>
+                                <option value="60000" ${(serverMonitor?.settings.repeatIntervalMs||60000)==60000?'selected':''}>1 minute</option>
+                                <option value="120000" ${(serverMonitor?.settings.repeatIntervalMs||60000)==120000?'selected':''}>2 minutes</option>
+                                <option value="180000" ${(serverMonitor?.settings.repeatIntervalMs||60000)==180000?'selected':''}>3 minutes</option>
+                            </select>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                            <label style="color:inherit; margin:0; font-size:11px;">[NEW] badge wears off after:</label>
+                            <select id="new-player-window" onchange="changeNewPlayerWindow(this.value)" style="padding:4px; border-radius:4px; background: rgba(255,255,255,0.05); color: white; border: none; font-size:11px;">
+                                <option value="3600000"   ${(serverMonitor?.settings.newPlayerWindowMs||21600000)==3600000  ?'selected':''}>1 hour</option>
+                                <option value="10800000"  ${(serverMonitor?.settings.newPlayerWindowMs||21600000)==10800000 ?'selected':''}>3 hours</option>
+                                <option value="21600000"  ${(serverMonitor?.settings.newPlayerWindowMs||21600000)==21600000 ?'selected':''}>6 hours</option>
+                                <option value="43200000"  ${(serverMonitor?.settings.newPlayerWindowMs||21600000)==43200000 ?'selected':''}>12 hours</option>
+                                <option value="86400000"  ${(serverMonitor?.settings.newPlayerWindowMs||21600000)==86400000 ?'selected':''}>1 day</option>
+                                <option value="172800000" ${(serverMonitor?.settings.newPlayerWindowMs||21600000)==172800000?'selected':''}>2 days</option>
+                                <option value="604800000" ${(serverMonitor?.settings.newPlayerWindowMs||21600000)==604800000?'selected':''}>7 days</option>
+                            </select>
+                        </div>
                         <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
                             <input type="checkbox" id="debug-mode" 
                                    onchange="toggleDebugMode(this.checked)" style="margin-right: 8px;">
@@ -2512,22 +2591,42 @@ User Agent: ${navigator.userAgent}
                             Test Sound
                         </button>
                     </div>
+                    <div style="font-size: 11px; font-weight: bold; color: rgba(255,255,255,0.5); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px;">Export Data</div>
                     <div style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px;">
-                        <button onclick="exportCurrentServer()" 
+                        <button onclick="exportActivityLog()" 
                                 style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
-                            Export Current
+                            Activity Log
+                        </button>
+                        <button onclick="exportPlayerDatabase()" 
+                                style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Player Database
+                        </button>
+                        <button onclick="importPlayerDatabase()" 
+                                style="background: #28a745; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Import Player DB
+                        </button>
+                        <button onclick="exportSavedPlayers()" 
+                                style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Saved Players
+                        </button>
+                        <button onclick="exportAlerts()" 
+                                style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Alert Players
+                        </button>
+                        <button onclick="exportCurrentServer()" 
+                                style="background: #6f42c1; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            Full Server Export
                         </button>
                         <button onclick="exportAllServers()" 
-                                style="background: #007bff; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
-                            Export All Data
+                                style="background: #6f42c1; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                            All Servers Export
                         </button>
+                    </div>
+                    <div style="font-size: 11px; font-weight: bold; color: rgba(255,255,255,0.5); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px;">Actions</div>
+                    <div style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px;">
                         <button onclick="clearLog()" 
                                 style="background: #ffc107; color: black; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                             Clear Log
-                        </button>
-                        <button onclick="toggleMonitoring()" id="monitoring-btn"
-                                style="background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
-                            Stop Monitoring
                         </button>
                     </div>
                     <div style="display: flex; gap: 5px; flex-wrap: wrap;">
@@ -2569,14 +2668,6 @@ User Agent: ${navigator.userAgent}
                         <button onclick="exportDebugLogs()" 
                                 style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                             Export JSON
-                        </button>
-                        <button onclick="exportAggregatedErrors()" 
-                                style="background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
-                            Export Groups
-                        </button>
-                        <button onclick="clearAggregatedErrors()" 
-                                style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
-                            Clear Groups
                         </button>
                         <button onclick="clearDebugLogs()" 
                                 style="background: #ffc107; color: black; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;">
@@ -2688,7 +2779,7 @@ User Agent: ${navigator.userAgent}
                 // Show filters when section is expanded
                 if (sectionId === 'recent-activity') {
                     const filters = document.getElementById('activity-filters');
-                    if (filters) filters.style.display = 'flex';
+                    if (filters) filters.style.display = 'block';
                 }
                 
                 // Refresh debug stats when debug console is opened
@@ -2904,10 +2995,19 @@ User Agent: ${navigator.userAgent}
         const lower = query.toLowerCase();
         const results = [];
 
+        // Apply time filter alongside text search
+        const timeFilter = (document.getElementById('activity-time-filter') || {}).value || 'all';
+        const timeCutoff = getActivityTimeCutoff(timeFilter);
+
         // Search from most recent to oldest for better UX
         for (let i = serverMonitor.activityLog.length - 1; i >= 0; i--) {
             const e = serverMonitor.activityLog[i];
             try {
+                // Time gate first (cheap)
+                if (timeCutoff > 0) {
+                    const ts = typeof e.timestamp === 'number' ? e.timestamp : new Date(e.timestamp).getTime();
+                    if (ts < timeCutoff) continue;
+                }
                 if ((e.playerName && e.playerName.toLowerCase().includes(lower)) ||
                     (e.playerId && e.playerId.toLowerCase().includes(lower)) ||
                     (e.action && e.action.toLowerCase().includes(lower)) ||
@@ -2915,11 +3015,16 @@ User Agent: ${navigator.userAgent}
                     results.push(e);
                 }
             } catch (err) { /* ignore */ }
-            if (results.length >= 200) break; // limit results
+            if (results.length >= 500) break; // reasonable cap
         }
 
         const activityDiv = document.getElementById('recent-activity-list');
         if (!activityDiv) return;
+
+        // Update result count
+        const countEl = document.getElementById('activity-result-count');
+        if (countEl) countEl.textContent = `${results.length} search result${results.length !== 1 ? 's' : ''}`;
+
         renderActivitySearchResults(results, activityDiv);
     };
 
@@ -2931,31 +3036,7 @@ User Agent: ${navigator.userAgent}
 
         let html = '';
         results.forEach(entry => {
-            const timeAgo = toRelativeTime(entry.timestamp);
-            const actionColor = entry.action === 'joined' ? '#28a745' : entry.action === 'left' ? '#dc3545' : '#ffc107';
-            const hasAlert = serverMonitor.alerts[entry.playerId];
-            const isSaved = serverMonitor.savedPlayers[entry.playerId];
-
-            let mainText = '';
-            if (entry.action === 'joined') mainText = `${entry.playerName} joined the game`;
-            else if (entry.action === 'left') mainText = `${entry.playerName} left the game`;
-            else if (entry.action === 'name_changed') mainText = `${entry.oldName || 'previous name'} → ${entry.playerName} changed name`;
-            else mainText = `${entry.playerName} ${entry.action}`;
-
-            html += `
-                <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
-                    <div style="flex: 1;">
-                        <div style="color: ${actionColor}; font-weight: bold;">${mainText} ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''} ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}</div>
-                        <div style="opacity: 0.7; font-size: 11px;">${timeAgo} - ${entry.time || new Date(entry.timestamp).toLocaleString()} - ID: ${entry.playerId}</div>
-                    </div>
-                    <div style="display:flex; gap:3px;">
-                        <button onclick="window.open('https://www.battlemetrics.com/players/${entry.playerId}', '_blank')" style="background:#17a2b8;color:white;border:none;padding:2px 5px;border-radius:3px;font-size:9px;">Profile</button>
-                        <button onclick="togglePlayerAlert('${entry.playerName}', '${entry.playerId}')" style="background:${hasAlert ? '#dc3545' : '#28a745'};color:white;border:none;padding:2px 5px;border-radius:3px;font-size:9px;">${hasAlert ? 'Remove' : 'Add Alert'}</button>
-                        <button onclick="savePlayer('${entry.playerName}', '${entry.playerId}')" style="background:${isSaved ? '#6c757d' : '#28a745'};color:white;border:none;padding:2px 5px;border-radius:3px;font-size:9px;" title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>${isSaved ? 'Saved' : 'Save'}</button>
-                        ${ (serverMonitor && serverMonitor.playerDatabase && serverMonitor.playerDatabase[entry.playerId] && serverMonitor.playerDatabase[entry.playerId].previousNames && serverMonitor.playerDatabase[entry.playerId].previousNames.length > 0) ? `<button onclick="showNameHistory('${entry.playerId}')" style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;">History</button>` : '' }
-                    </div>
-                </div>
-            `;
+            html += buildActivityEntryHTML(entry);
         });
 
         container.innerHTML = html;
@@ -3036,6 +3117,32 @@ User Agent: ${navigator.userAgent}
             serverMonitor.acknowledgeAlert(alertId);
         }
     };
+
+    window.acknowledgeAllRecentAlerts = () => {
+        if (serverMonitor) {
+            serverMonitor.acknowledgeAllAlerts();
+        }
+    };
+
+    window.clearAllRecentAlerts = (() => {
+        let pending = false;
+        let timer = null;
+        return (btn) => {
+            if (!pending) {
+                pending = true;
+                if (btn) { btn.textContent = 'Sure?'; btn.style.background = '#a71d2a'; }
+                timer = setTimeout(() => {
+                    pending = false;
+                    if (btn) { btn.textContent = '\u2715 Clear All'; btn.style.background = '#dc3545'; }
+                }, 2000);
+            } else {
+                clearTimeout(timer);
+                pending = false;
+                if (btn) { btn.textContent = '\u2715 Clear All'; btn.style.background = '#dc3545'; }
+                if (serverMonitor) serverMonitor.clearAllRecentAlerts();
+            }
+        };
+    })();
 
     window.handleDatabaseSearch = (query) => {
         if (!serverMonitor) return;
@@ -3135,6 +3242,27 @@ User Agent: ${navigator.userAgent}
                 if (unacknowledged.length > 0) {
                     serverMonitor.startAlertReminders();
                 }
+            }
+        }
+    };
+
+    window.changeNewPlayerWindow = (ms) => {
+        if (serverMonitor) {
+            serverMonitor.settings.newPlayerWindowMs = parseInt(ms, 10);
+            serverMonitor.saveSettings();
+            // Refresh activity display so [NEW] badges update immediately
+            serverMonitor.updateActivityDisplay();
+        }
+    };
+
+    window.changeRepeatInterval = (ms) => {
+        if (serverMonitor) {
+            serverMonitor.settings.repeatIntervalMs = parseInt(ms, 10);
+            serverMonitor.saveSettings();
+            // Restart the reminder timer with the new interval if it's running
+            if (alertReminderInterval) {
+                serverMonitor.stopAlertReminders();
+                serverMonitor.startAlertReminders();
             }
         }
     };
@@ -3259,82 +3387,389 @@ User Agent: ${navigator.userAgent}
         }
     };
 
+    // ── Export helpers ─────────────────────────────────────────────────────────
+
+    // Load and close any still-open session before exporting so the export
+    // always reflects the full current session duration.
+    const getSessionsForExport = (serverID) => {
+        const key = `bms_script_sessions_${serverID}`;
+        try {
+            const sessions = JSON.parse(localStorage.getItem(key) || '[]');
+            const now = Date.now();
+            // Patch any still-open session with an up-to-date end time for the export
+            // (doesn't actually close it — the live session stays open)
+            return sessions.map(s => {
+                if (s.end === null) {
+                    return {
+                        ...s,
+                        end: now,
+                        endISO: new Date(now).toISOString(),
+                        durationSeconds: Math.round((now - s.start) / 1000),
+                        note: 'session_still_active'
+                    };
+                }
+                return s;
+            });
+        } catch (e) { return []; }
+    };
+
+    // Build the coverage gaps list from sessions (periods the script was closed)
+    const buildGapsFromSessions = (sessions) => {
+        if (!sessions || sessions.length < 2) return [];
+        const sorted = [...sessions].sort((a, b) => a.start - b.start);
+        const gaps = [];
+        for (let i = 1; i < sorted.length; i++) {
+            const gapStart = sorted[i - 1].end;
+            const gapEnd = sorted[i].start;
+            if (gapStart && gapEnd && gapEnd > gapStart) {
+                const durationSeconds = Math.round((gapEnd - gapStart) / 1000);
+                gaps.push({
+                    gapStart,
+                    gapStartISO: sorted[i - 1].endISO,
+                    gapEnd,
+                    gapEndISO: sorted[i].startISO,
+                    durationSeconds,
+                    note: 'script_was_closed_during_this_period'
+                });
+            }
+        }
+        return gaps;
+    };
+
     window.exportCurrentServer = () => {
         if (!serverMonitor) {
             alert('No server monitor data available to export.');
             return;
         }
-        
+
+        const sessions = getSessionsForExport(currentServerID);
+
+        const exportData = {
+            _format: 'bms_server_export_v2',
+            exportDate: new Date().toISOString(),
+            serverID: currentServerID,
+            serverName: currentServerName,
+            analysis_hints: {
+                activity_log: 'Each entry has timestamp (ms epoch), utcISO, dayOfWeek (0=Sun), hourUTC, hourLocal, action (joined/left/name_changed), playerName, playerId',
+                script_sessions: 'Periods the script was actively running. Gaps between sessions = data was NOT being collected.',
+                coverage_gaps: 'Explicit list of time ranges when the script was closed. Player activity during gaps was NOT logged.',
+                player_database: 'All players ever seen. currentName = latest known name. previousNames = name history.'
+            },
+            script_sessions: sessions,
+            coverage_gaps: buildGapsFromSessions(sessions),
+            activity_log: serverMonitor.activityLog,
+            player_database: serverMonitor.playerDatabase,
+            population_history: serverMonitor.populationHistory,
+            alerts: serverMonitor.alerts,
+            saved_players: serverMonitor.savedPlayers,
+            recent_alerts: serverMonitor.recentAlerts,
+            settings: serverMonitor.settings
+        };
+
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `bms_server_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        alert('Server data exported successfully!');
+    };
+
+    window.exportAllServers = () => {
+        // Collect all server IDs from localStorage keys
+        const serverIDs = new Set();
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key || !key.startsWith('bms_')) continue;
+            const m = key.match(/bms_(?:player_alerts|activity_log|player_database|population_history)_(\d+)/);
+            if (m) serverIDs.add(m[1]);
+        }
+
+        if (serverIDs.size === 0) {
+            alert('No BattleMetrics Monitor data found to export.');
+            return;
+        }
+
+        const loadKey = (key, defaultVal) => {
+            try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(defaultVal)); }
+            catch (e) { return defaultVal; }
+        };
+
+        const servers = [];
+        for (const sid of serverIDs) {
+            const sessions  = getSessionsForExport(sid);
+            const actLog    = loadKey(`bms_activity_log_${sid}`, []);
+            const playerDB  = loadKey(`bms_player_database_${sid}`, {});
+            const popHist   = loadKey(`bms_population_history_${sid}`, []);
+            const alerts    = loadKey(`bms_player_alerts_${sid}`, {});
+            const saved     = loadKey(`bms_saved_players_${sid}`, {});
+
+            // Try to resolve server name from activity log or player DB
+            let sName = '';
+            if (sid === currentServerID) sName = currentServerName;
+            if (!sName && actLog.length) sName = actLog[actLog.length - 1].serverName || '';
+            if (!sName && sessions.length) sName = sessions[sessions.length - 1].serverName || '';
+            if (!sName) sName = `Server ${sid}`;
+
+            servers.push({
+                serverID: sid,
+                serverName: sName,
+                script_sessions: sessions,
+                coverage_gaps: buildGapsFromSessions(sessions),
+                activity_log: actLog,
+                player_database: playerDB,
+                population_history: popHist,
+                alerts,
+                saved_players: saved
+            });
+        }
+
+        const exportData = {
+            _format: 'bms_all_servers_export_v2',
+            exportDate: new Date().toISOString(),
+            totalServers: servers.length,
+            analysis_hints: {
+                servers: 'Array of server objects. Each has activity_log, player_database, script_sessions, coverage_gaps.',
+                activity_log: 'Chronological events: joined/left/name_changed. Fields: timestamp(ms), utcISO, dayOfWeek(0=Sun..6=Sat), hourUTC, hourLocal, playerName, playerId, action.',
+                script_sessions: 'Time windows when the script was running. start/end are ms epoch. durationSeconds = how long that session lasted.',
+                coverage_gaps: 'Time ranges between sessions when no data was collected (script was closed). Use these to exclude gaps from pattern analysis.',
+                population_history: 'Array of {timestamp, count} snapshots of online player count over time.',
+                player_database: 'Keyed by playerId. Fields: currentName, originalName, previousNames[], firstSeen(ms), lastSeen(ms), nameChanged, manuallyAdded.',
+                usage_tips: [
+                    'To find when a player is usually online: filter activity_log by playerId, extract hourLocal from "joined" actions, group by hour.',
+                    'To find peak server hours: group activity_log joined events by hourLocal and count.',
+                    'Ignore events inside coverage_gaps when computing absence patterns — the data is simply missing, not that they were offline.',
+                    'dayOfWeek 0=Sunday, 1=Monday... 6=Saturday.'
+                ]
+            },
+            servers
+        };
+
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `bms_all_servers_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        alert(`Exported data from ${servers.length} server(s).`);
+    };
+
+    window.exportActivityLog = () => {
+        if (!serverMonitor) { alert('No server monitor data available.'); return; }
+        const sessions = getSessionsForExport(currentServerID);
+        const exportData = {
+            _format: 'bms_activity_log_v2',
+            serverID: currentServerID,
+            serverName: currentServerName,
+            exportDate: new Date().toISOString(),
+            analysis_hints: {
+                activity_log: 'Chronological events. Fields: timestamp(ms epoch), utcISO, dayOfWeek(0=Sun..6=Sat), hourUTC, hourLocal, action(joined/left/name_changed), playerName, playerId.',
+                script_sessions: 'When the script was running. Use coverage_gaps to know when data was NOT being collected.',
+                coverage_gaps: 'Periods the script was closed — no player events were captured during these times.'
+            },
+            script_sessions: sessions,
+            coverage_gaps: buildGapsFromSessions(sessions),
+            activity_log: serverMonitor.activityLog
+        };
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `bms_activity_log_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        alert(`Activity log exported (${serverMonitor.activityLog.length} entries, ${sessions.length} sessions).`);
+    };
+
+    window.exportPlayerDatabase = () => {
+        if (!serverMonitor) { alert('No server monitor data available.'); return; }
+        const db = serverMonitor.playerDatabase || {};
+        const count = Object.keys(db).length;
+        if (!count) { alert('Player database is empty.'); return; }
         const exportData = {
             serverID: currentServerID,
             serverName: currentServerName,
             exportDate: new Date().toISOString(),
-            alerts: serverMonitor.alerts,
-            activityLog: serverMonitor.activityLog,
-            settings: serverMonitor.settings,
-            savedPlayers: serverMonitor.savedPlayers,
-            recentAlerts: serverMonitor.recentAlerts,
-            playerDatabase: serverMonitor.playerDatabase,
-            populationHistory: serverMonitor.populationHistory
+            playerDatabase: db
         };
-        
         const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `battlemetrics_monitor_server_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
+        a.download = `bms_player_database_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        
-        alert('Current server data exported successfully!');
+        alert(`Player database exported (${count} players).`);
     };
 
-    window.exportAllServers = () => {
-        const allData = {};
-        let hasData = false;
-        
-        // Collect all BattleMetrics Monitor data from localStorage
-        for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key && key.startsWith('bms_')) {
-                try {
-                    const value = localStorage.getItem(key);
-                    allData[key] = JSON.parse(value);
-                    hasData = true;
-                } catch (e) {
-                    // If parsing fails, store as string
-                    allData[key] = localStorage.getItem(key);
-                    hasData = true;
-                }
-            }
-        }
-        
-        if (!hasData) {
-            alert('No BattleMetrics Monitor data found to export.');
-            return;
-        }
-        
+    window.exportSavedPlayers = () => {
+        if (!serverMonitor) { alert('No server monitor data available.'); return; }
+        const saved = serverMonitor.savedPlayers || {};
+        const count = Object.keys(saved).length;
+        if (!count) { alert('No saved players found.'); return; }
         const exportData = {
+            serverID: currentServerID,
+            serverName: currentServerName,
             exportDate: new Date().toISOString(),
-            exportType: 'all_servers',
-            currentServerID: currentServerID,
-            data: allData
+            savedPlayers: saved
         };
-        
         const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `battlemetrics_monitor_all_data_${new Date().toISOString().split('T')[0]}.json`;
+        a.download = `bms_saved_players_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        
-        const serverCount = Object.keys(allData).filter(key => key.includes('_player_alerts_')).length;
-        alert(`All data exported successfully!\nIncluded data from ${serverCount} servers.`);
+        alert(`Saved players exported (${count} players).`);
+    };
+
+    window.exportAlerts = () => {
+        if (!serverMonitor) { alert('No server monitor data available.'); return; }
+        const alerts = serverMonitor.alerts || {};
+        const count = Object.keys(alerts).length;
+        if (!count) { alert('No alert players found.'); return; }
+        const exportData = {
+            serverID: currentServerID,
+            serverName: currentServerName,
+            exportDate: new Date().toISOString(),
+            alerts: alerts
+        };
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `bms_alert_players_${currentServerID}_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        alert(`Alert players exported (${count} players).`);
+    };
+
+    window.importPlayerDatabase = () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.style.display = 'none';
+        document.body.appendChild(input);
+        input.addEventListener('change', () => {
+            const file = input.files && input.files[0];
+            document.body.removeChild(input);
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                let parsed;
+                try {
+                    parsed = JSON.parse(e.target.result);
+                } catch (err) {
+                    alert('Failed to parse JSON file. Make sure it is a valid player database export.');
+                    return;
+                }
+
+                // Accept either a raw {id: entry} map or an export envelope with a playerDatabase key
+                const incoming = (parsed && typeof parsed.playerDatabase === 'object' && parsed.playerDatabase !== null)
+                    ? parsed.playerDatabase
+                    : (parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null);
+
+                if (!incoming) {
+                    alert('Unrecognised format. Expected a player database export file.');
+                    return;
+                }
+
+                // Validate that it looks like a player DB (values should have id/currentName)
+                const entries = Object.entries(incoming);
+                if (entries.length === 0) { alert('Imported file contains no player entries.'); return; }
+                const sample = entries[0][1];
+                if (!sample || (typeof sample.currentName === 'undefined' && typeof sample.originalName === 'undefined')) {
+                    alert('Unrecognised format — entries do not look like player records.');
+                    return;
+                }
+
+                if (!serverMonitor) { alert('No active server monitor.'); return; }
+
+                const db = serverMonitor.playerDatabase;
+                let added = 0, merged = 0;
+
+                for (const [id, incoming_player] of entries) {
+                    const existing = db[id];
+                    if (!existing) {
+                        // Brand new player — import as-is (sanitise fields we rely on)
+                        db[id] = {
+                            id: id,
+                            currentName: incoming_player.currentName || incoming_player.originalName || id,
+                            originalName: incoming_player.originalName || incoming_player.currentName || id,
+                            firstSeen: incoming_player.firstSeen || Date.now(),
+                            lastSeen: incoming_player.lastSeen || Date.now(),
+                            nameChanged: !!(incoming_player.nameChanged || (incoming_player.previousNames && incoming_player.previousNames.length > 0)),
+                            previousNames: Array.isArray(incoming_player.previousNames) ? [...incoming_player.previousNames] : []
+                        };
+                        added++;
+                    } else {
+                        // Merge into existing record
+                        // 1. Merge previousNames — collect all unique names (case+whitespace insensitive)
+                        const normalise = n => (n || '').trim().toLowerCase();
+                        const nameStr = e => (typeof e === 'string' ? e : (e && e.name) || '');
+                        const allNames = new Map(); // normalised -> entry (string or object)
+                        // seed with existing names, preserving original entries
+                        for (const e of (existing.previousNames || [])) allNames.set(normalise(nameStr(e)), e);
+                        // add incoming previousNames
+                        for (const e of (incoming_player.previousNames || [])) {
+                            if (!allNames.has(normalise(nameStr(e)))) allNames.set(normalise(nameStr(e)), e);
+                        }
+                        // make sure neither currentName ends up in previousNames
+                        const currentNorm = normalise(existing.currentName);
+                        allNames.delete(currentNorm);
+
+                        // 2. If incoming has a more-recent currentName, push the old current into history
+                        const incomingLastSeen = incoming_player.lastSeen || 0;
+                        if (incomingLastSeen > (existing.lastSeen || 0)) {
+                            const incomingCurrent = incoming_player.currentName || '';
+                            if (incomingCurrent && normalise(incomingCurrent) !== normalise(existing.currentName)) {
+                                // old current name goes to history — use object format if we know when
+                                if (!allNames.has(currentNorm)) {
+                                    allNames.set(currentNorm, { name: existing.currentName, changedAt: existing.lastSeen || null, changedAtISO: existing.lastSeen ? new Date(existing.lastSeen).toISOString() : null });
+                                }
+                                existing.currentName = incomingCurrent;
+                                existing.nameChanged = true;
+                            }
+                            existing.lastSeen = incomingLastSeen;
+                        }
+
+                        // 3. Keep earliest firstSeen
+                        if (incoming_player.firstSeen && incoming_player.firstSeen < (existing.firstSeen || Infinity)) {
+                            existing.firstSeen = incoming_player.firstSeen;
+                            // originalName should reflect the earliest known name
+                            existing.originalName = incoming_player.originalName || incoming_player.currentName || existing.originalName;
+                        }
+
+                        // 4. Remove current name from history again in case merge added it
+                        allNames.delete(normalise(existing.currentName));
+
+                        existing.previousNames = [...allNames.values()];
+                        existing.nameChanged = existing.nameChanged || existing.previousNames.length > 0;
+                        merged++;
+                    }
+                }
+
+                serverMonitor.savePlayerDatabase();
+                serverMonitor.updateDatabaseDisplay();
+                alert(`Import complete!\n\nNew players added: ${added}\nExisting players merged: ${merged}\nTotal in database: ${Object.keys(db).length}`);
+            };
+            reader.readAsText(file);
+        });
+        input.click();
     };
 
     window.savePlayer = (playerName, playerId) => {
@@ -3423,14 +3858,19 @@ User Agent: ${navigator.userAgent}
 
         const list = document.createElement('div');
         list.style.cssText = 'font-size:13px; color:#e9ecef; margin-bottom:10px;';
+        const _ns = e => (typeof e === 'string' ? e : (e && e.name) || '');
+        const _ts = e => (e && e.changedAt ? new Date(e.changedAt).toLocaleString() : null);
         const prev = dbPlayer.previousNames && dbPlayer.previousNames.length ? dbPlayer.previousNames.slice().reverse() : [];
         if (prev.length === 0) {
             list.innerHTML = '<div style="opacity:0.7;">No previous names recorded</div>';
         } else {
-            prev.forEach((n, idx) => {
+            prev.forEach((entry) => {
+                const nameText = _ns(entry);
+                const dateText = _ts(entry);
                 const d = document.createElement('div');
-                d.style.cssText = 'padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.03);';
-                d.textContent = `${n}`;
+                d.style.cssText = 'padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.07); display:flex; justify-content:space-between; align-items:baseline; gap:8px;';
+                d.innerHTML = `<span style="font-weight:500;">${nameText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>`
+                    + (dateText ? `<span style="font-size:10px; color:#6c757d; white-space:nowrap;">${dateText}</span>` : `<span style="font-size:10px; color:#6c757d;">date unknown</span>`);
                 list.appendChild(d);
             });
         }
@@ -3442,12 +3882,29 @@ User Agent: ${navigator.userAgent}
         const resetBtn = document.createElement('button');
         resetBtn.textContent = 'Reset History';
         resetBtn.style.cssText = 'background:#dc3545; color:white; border:none; padding:6px 8px; border-radius:4px; cursor:pointer;';
-        resetBtn.onclick = () => {
-            if (confirm('Reset name history for ' + dbPlayer.currentName + '? This cannot be undone.')) {
-                window.resetNameHistory(playerId);
-                modal.remove();
-            }
-        };
+        resetBtn.onclick = (() => {
+            let pending = false;
+            let timer = null;
+            return () => {
+                if (pending) {
+                    clearTimeout(timer);
+                    pending = false;
+                    resetBtn.textContent = 'Reset History';
+                    resetBtn.style.background = '#dc3545';
+                    window.resetNameHistory(playerId);
+                    modal.remove();
+                } else {
+                    pending = true;
+                    resetBtn.textContent = 'Sure?';
+                    resetBtn.style.background = '#a71d2a';
+                    timer = setTimeout(() => {
+                        pending = false;
+                        resetBtn.textContent = 'Reset History';
+                        resetBtn.style.background = '#dc3545';
+                    }, 2000);
+                }
+            };
+        })();
 
         const exportBtn = document.createElement('button');
         exportBtn.textContent = 'Export';
@@ -3479,97 +3936,208 @@ User Agent: ${navigator.userAgent}
     };
 
     // Filter functions
-    window.filterActivity = (filterType) => {
+
+    // Shared helper: builds HTML for a single activity entry.
+    // Used by both applyActivityFilters and renderActivitySearchResults so display is always consistent.
+    // Cache for first-detection lookups — invalidated when activityLog grows
+    let _fdCacheSize = -1;
+    let _fdMap = new Map(); // playerId -> earliest timestamp in activityLog
+    const getFirstDetectionMap = () => {
+        if (!serverMonitor) return _fdMap;
+        const log = serverMonitor.activityLog;
+        if (log.length === _fdCacheSize) return _fdMap;
+        _fdMap = new Map();
+        for (const e of log) {
+            if (e.playerId && (!_fdMap.has(e.playerId) || e.timestamp < _fdMap.get(e.playerId))) {
+                _fdMap.set(e.playerId, e.timestamp);
+            }
+        }
+        _fdCacheSize = log.length;
+        return _fdMap;
+    };
+
+    // Returns the configured "new player" wear-off window in ms (default 6h)
+    const getNewPlayerWindowMs = () => {
+        return (serverMonitor && serverMonitor.settings && serverMonitor.settings.newPlayerWindowMs)
+            ? serverMonitor.settings.newPlayerWindowMs
+            : 6 * 60 * 60 * 1000;
+    };
+
+    // True if this entry is the player's very first detection AND it happened within the wear-off window
+    const checkIsNewPlayer = (entry) => {
+        if (!entry.playerId) return false;
+        const fdMap = getFirstDetectionMap();
+        const firstTs = fdMap.get(entry.playerId);
+        if (firstTs === undefined || firstTs !== entry.timestamp) return false; // not first entry
+        return (Date.now() - firstTs) < getNewPlayerWindowMs();
+    };
+
+    const buildActivityEntryHTML = (entry) => {
+        const timeAgo  = toRelativeTime(entry.timestamp);
+        const hasAlert = serverMonitor && serverMonitor.alerts[entry.playerId];
+        const isSaved  = serverMonitor && serverMonitor.savedPlayers[entry.playerId];
+        const dbPlayer = serverMonitor && serverMonitor.playerDatabase && serverMonitor.playerDatabase[entry.playerId];
+        const fdMap    = getFirstDetectionMap();
+        const isNewPlayer = checkIsNewPlayer(entry);
+
+        // Escape single/double quotes so player names with apostrophes don't break onclick attributes
+        const safeName = String(entry.playerName || '').replace(/'/g, '&#39;').replace(/"/g, '&#34;');
+        const safeId   = String(entry.playerId || '');
+
+        let mainLine = '';
+        let actionColor = '#6c757d';
+        let actionLabel = '';
+
+        if (entry.action === 'joined') {
+            mainLine = `▶ <strong>${entry.playerName}</strong> <span style="font-weight:normal;opacity:0.85">joined the game</span>`;
+            actionColor = '#28a745';
+            actionLabel = 'Joined';
+        } else if (entry.action === 'left') {
+            mainLine = `◀ <strong>${entry.playerName}</strong> <span style="font-weight:normal;opacity:0.85">left the game</span>`;
+            actionColor = '#dc3545';
+            actionLabel = 'Left';
+        } else if (entry.action === 'name_changed') {
+            const oldName = entry.oldName || '?';
+            // Show: ✏  PreviousName  →  NewName
+            // Strikethrough on old, bold on new so the change is obvious at a glance
+            mainLine = `✏ <span style="opacity:0.65;text-decoration:line-through">${oldName}</span> <span style="opacity:0.75">→</span> <strong>${entry.playerName}</strong>`;
+            actionColor = '#ffc107';
+            actionLabel = 'Name Changed';
+        } else {
+            mainLine = `${entry.playerName} ${entry.action}`;
+            actionLabel = entry.action;
+        }
+
+        const timeStr = entry.time || new Date(entry.timestamp).toLocaleString();
+        // Metadata row: action type · relative time · exact time · ID
+        const metaLine = `${actionLabel} · ${timeAgo} · ${timeStr} · ID: ${safeId}`;
+
+        // Show History for any name_changed entry — player is always in the DB at this point
+        const showHistory = entry.action === 'name_changed' && !!dbPlayer;
+
+        return `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
+                <div style="flex: 1; min-width: 0; margin-right: 6px;">
+                    <div style="color: ${actionColor}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                        ${mainLine}
+                        ${isNewPlayer ? '<span style="color: #17a2b8; margin-left: 5px; font-size: 10px;">[NEW]</span>' : ''}
+                        ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px; font-size: 10px;">[ALERT]</span>' : ''}
+                        ${isSaved  ? '<span style="color: #28a745;  margin-left: 5px; font-size: 10px;">[SAVED]</span>'  : ''}
+                    </div>
+                    <div style="opacity: 0.55; font-size: 10px; margin-top: 2px; word-break: break-word;">${metaLine}</div>
+                </div>
+                <div style="display: flex; gap: 3px; flex-shrink: 0;">
+                    <button onclick="window.open('https://www.battlemetrics.com/players/${safeId}', '_blank')"
+                            style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                            title="View Profile">Profile</button>
+                    <button onclick="togglePlayerAlert('${safeName}', '${safeId}')"
+                            style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                            title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">${hasAlert ? 'Remove' : 'Add Alert'}</button>
+                    <button onclick="savePlayer('${safeName}', '${safeId}')"
+                            style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                            title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>${isSaved ? 'Saved' : 'Save'}</button>
+                    ${showHistory ? `<button onclick="showNameHistory('${safeId}')" style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;" title="View name history">History</button>` : ''}
+                </div>
+            </div>
+        `;
+    };
+
+    // Helper: convert time filter value to a cutoff timestamp (0 = no cutoff)
+    const getActivityTimeCutoff = (timeFilter) => {
+        const now = Date.now();
+        switch (timeFilter) {
+            case '1h':  return now - (1 * 60 * 60 * 1000);
+            case '3h':  return now - (3 * 60 * 60 * 1000);
+            case '6h':  return now - (6 * 60 * 60 * 1000);
+            case '24h': return now - (24 * 60 * 60 * 1000);
+            case '7d':  return now - (7 * 24 * 60 * 60 * 1000);
+            default:    return 0;
+        }
+    };
+
+    // Unified activity filter — reads both action select and time select, renders result
+    window.applyActivityFilters = () => {
         if (!serverMonitor) return;
-        
+
         const activityDiv = document.getElementById('recent-activity-list');
         if (!activityDiv) return;
 
-        let filteredActivity = [...serverMonitor.activityLog];
-        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+        const actionFilter = (document.getElementById('activity-filter') || {}).value || 'all';
+        const timeFilter  = (document.getElementById('activity-time-filter') || {}).value || 'all';
+        const timeCutoff  = getActivityTimeCutoff(timeFilter);
 
-        switch (filterType) {
-            case 'joined':
-                filteredActivity = filteredActivity.filter(entry => entry.action === 'joined');
-                break;
-            case 'left':
-                filteredActivity = filteredActivity.filter(entry => entry.action === 'left');
-                break;
-            case 'name_changed':
-                filteredActivity = filteredActivity.filter(entry => entry.action === 'name_changed');
-                break;
-            case 'recent':
-                filteredActivity = filteredActivity.filter(entry => entry.timestamp >= oneHourAgo);
-                break;
-            case 'all':
-            default:
-                // Show all
-                break;
+        let filtered = serverMonitor.activityLog;
+
+        // Apply action filter
+        if (actionFilter === 'new_players') {
+            // Show only each player's first-ever entry, and only if still within wear-off window
+            const fdMap = getFirstDetectionMap();
+            const windowMs = getNewPlayerWindowMs();
+            filtered = filtered.filter(e => {
+                if (!e.playerId) return false;
+                const firstTs = fdMap.get(e.playerId);
+                return firstTs === e.timestamp && (Date.now() - firstTs) < windowMs;
+            });
+        } else if (actionFilter !== 'all') {
+            filtered = filtered.filter(e => e.action === actionFilter);
         }
 
-        // Display filtered results
-        filteredActivity = filteredActivity.slice(-100).reverse(); // Last 100, most recent first
-        
-        if (filteredActivity.length === 0) {
+        // Apply time filter
+        if (timeCutoff > 0) {
+            filtered = filtered.filter(e => {
+                const ts = typeof e.timestamp === 'number' ? e.timestamp : new Date(e.timestamp).getTime();
+                return ts >= timeCutoff;
+            });
+        }
+
+        // Sort most recent first (full list, no arbitrary cap)
+        const sorted = filtered.slice().reverse();
+
+        // Update result count
+        const countEl = document.getElementById('activity-result-count');
+        if (countEl) {
+            const total = serverMonitor.activityLog.length;
+            if (sorted.length === total) {
+                countEl.textContent = `${total} total entries`;
+            } else {
+                countEl.textContent = `Showing ${sorted.length} of ${total} entries`;
+            }
+        }
+
+        if (sorted.length === 0) {
             activityDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No activity matches filter</div>';
             return;
         }
 
         let activityHTML = '';
-        filteredActivity.forEach(entry => {
-            const timeAgo = toRelativeTime(entry.timestamp);
-            const actionColor = entry.action === 'joined' ? '#28a745' : entry.action === 'left' ? '#dc3545' : '#ffc107';
-            const hasAlert = serverMonitor.alerts[entry.playerId];
-            const isSaved = serverMonitor.savedPlayers[entry.playerId];
-            const actionText = entry.action === 'joined' ? 'joined the game' : entry.action === 'left' ? 'left the game' : entry.action === 'name_changed' ? 'changed name' : `${entry.action} the game`;
-
-            activityHTML += `
-                <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
-                    <div style="flex: 1;">
-                        <div style="color: ${actionColor}; font-weight: bold;">
-                            ${entry.playerName} ${actionText}
-                            ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
-                            ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
-                        </div>
-                        <div style="opacity: 0.7; font-size: 11px;">${timeAgo} - ${entry.time} - ID: ${entry.playerId}</div>
-                    </div>
-                    <div style="display: flex; gap: 3px;">
-                        <button onclick="window.open('https://www.battlemetrics.com/players/${entry.playerId}', '_blank')" 
-                                style="background: #17a2b8; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                title="View Profile">
-                            Profile
-                        </button>
-                        <button onclick="togglePlayerAlert('${entry.playerName}', '${entry.playerId}')" 
-                                style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
-                            ${hasAlert ? 'Remove' : 'Add Alert'}
-                        </button>
-                        <button onclick="savePlayer('${entry.playerName}', '${entry.playerId}')" 
-                                style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
-                            ${isSaved ? 'Saved' : 'Save'}
-                        </button>
-                        ${ (serverMonitor && serverMonitor.playerDatabase && serverMonitor.playerDatabase[entry.playerId] && serverMonitor.playerDatabase[entry.playerId].previousNames && serverMonitor.playerDatabase[entry.playerId].previousNames.length > 0) ? `<button onclick="showNameHistory('${entry.playerId}')" style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;">History</button>` : '' }
-                    </div>
-                </div>
-            `;
+        sorted.forEach(entry => {
+            activityHTML += buildActivityEntryHTML(entry);
         });
 
         activityDiv.innerHTML = activityHTML;
     };
 
+    // Backward-compat wrapper: callers passing 'joined'/'left'/etc. still work
+    window.filterActivity = (actionType) => {
+        const sel = document.getElementById('activity-filter');
+        if (sel) sel.value = actionType || 'all';
+        window.applyActivityFilters();
+    };
+
     window.clearActivityFilter = () => {
         const filterSelect = document.getElementById('activity-filter');
+        const timeSelect = document.getElementById('activity-time-filter');
         const searchInput = document.getElementById('activity-search');
-        if (filterSelect) {
-            filterSelect.value = 'all';
-            filterActivity('all');
-        }
-        if (searchInput) {
-            searchInput.value = '';
-            activeActivitySearch = '';
-            if (serverMonitor) serverMonitor.updateActivityDisplay();
-        }
+        const countEl = document.getElementById('activity-result-count');
+
+        if (filterSelect) filterSelect.value = 'all';
+        if (timeSelect) timeSelect.value = 'all';
+        if (countEl) countEl.textContent = '';
+
+        activeActivitySearch = '';
+        if (searchInput) searchInput.value = '';
+
+        if (serverMonitor) serverMonitor.updateActivityDisplay();
     };
 
 
@@ -3588,12 +4156,6 @@ User Agent: ${navigator.userAgent}
                 break;
             case 'offline':
                 filteredPlayers = filteredPlayers.filter(player => !serverMonitor.currentPlayers.has(player.id));
-                break;
-            case 'recent-left':
-                // Players who were seen recently but are now offline (last 3 hours)
-                filteredPlayers = filteredPlayers.filter(player => 
-                    !serverMonitor.currentPlayers.has(player.id) && player.lastSeen >= threeHoursAgo
-                );
                 break;
             case 'name-changed':
                 filteredPlayers = filteredPlayers.filter(player => player.nameChanged);
@@ -3629,6 +4191,65 @@ User Agent: ${navigator.userAgent}
             filterSelect.value = 'all';
             filterDatabase('all');
         }
+    };
+
+    window.manuallyAddPlayer = () => {
+        const idInput = document.getElementById('manual-add-id');
+        const nicknameInput = document.getElementById('manual-add-nickname');
+        const alertCheckbox = document.getElementById('manual-add-alert');
+        if (!idInput) return;
+
+        const rawId = idInput.value.trim();
+        if (!rawId) {
+            idInput.focus();
+            idInput.style.outline = '1px solid #dc3545';
+            setTimeout(() => { idInput.style.outline = ''; }, 1500);
+            return;
+        }
+
+        // Validate: only digits
+        if (!/^\d+$/.test(rawId)) {
+            idInput.style.outline = '1px solid #dc3545';
+            setTimeout(() => { idInput.style.outline = ''; }, 1500);
+            return;
+        }
+
+        if (!serverMonitor) return;
+
+        const nickname = nicknameInput ? nicknameInput.value.trim() : '';
+        const displayName = nickname || 'Unknown Player';
+        const wantAlert = alertCheckbox && alertCheckbox.checked;
+
+        // Add to database — flag as manually added so real-name updates preserve the nickname in history
+        const existing = serverMonitor.playerDatabase[rawId];
+        if (!existing) {
+            serverMonitor.playerDatabase[rawId] = {
+                id: rawId,
+                currentName: displayName,
+                originalName: displayName,
+                firstSeen: Date.now(),
+                lastSeen: Date.now(),
+                nameChanged: false,
+                previousNames: [],
+                manuallyAdded: true,
+                nickname: nickname || null
+            };
+            serverMonitor.savePlayerDatabase();
+        }
+
+        if (wantAlert) {
+            if (!serverMonitor.alerts[rawId]) {
+                serverMonitor.addAlert(displayName, rawId, 'both');
+            }
+        }
+
+        serverMonitor.updateDatabaseDisplay();
+        if (wantAlert) serverMonitor.updateAlertDisplay();
+
+        // Clear inputs
+        idInput.value = '';
+        if (nicknameInput) nicknameInput.value = '';
+        if (alertCheckbox) alertCheckbox.checked = false;
     };
 
     window.testSound = () => {
@@ -3712,8 +4333,10 @@ User Agent: ${navigator.userAgent}
             const msg = ev.message || 'Window error';
             const src = ev.filename ? `${ev.filename}:${ev.lineno}:${ev.colno}` : '';
             const err = ev.error || {};
+            // Always filter obfuscated site errors (window["__f__..."] pattern)
+            if (/window\[["']__f__/i.test(msg)) return;
             // Filter out noisy third-party/site errors unless verbose debug is enabled
-            const isSiteError = ev.filename && ev.filename.includes('battlemetrics.com');
+            const isSiteError = !ev.filename || ev.filename.includes('battlemetrics.com') || ev.filename.includes('cdn.');
             if (isSiteError && debugConsole && !debugConsole.verbose) {
                 // Do not log site errors in normal mode to reduce noise
                 return;
@@ -3767,6 +4390,10 @@ User Agent: ${navigator.userAgent}
             console.error('Error in unhandledrejection handler', e);
         }
     });
+
+    const refreshDebugStats = () => {
+        if (debugConsole) debugConsole.updateDebugStats();
+    };
 
     window.exportDebugLogs = () => {
         debugConsole.exportLogs();
@@ -4219,6 +4846,63 @@ User Agent: ${navigator.userAgent}
             debugConsole.debug('Creating new ServerMonitor instance...');
             serverMonitor = new ServerMonitor();
             debugConsole.info('ServerMonitor initialized successfully');
+
+            // ── Script Session Tracking ──────────────────────────────────────
+            // Record that the script is now open so exports can show gaps when
+            // the browser/tab was closed.
+            const startScriptSession = () => {
+                if (!SESSIONS_KEY) return;
+                try {
+                    const sessions = JSON.parse(localStorage.getItem(SESSIONS_KEY) || '[]');
+                    const now = Date.now();
+                    const d = new Date(now);
+                    sessions.push({
+                        start: now,
+                        startISO: d.toISOString(),
+                        end: null,
+                        endISO: null,
+                        durationSeconds: null,
+                        serverID: currentServerID,
+                        serverName: currentServerName
+                    });
+                    // Keep only last 500 sessions to avoid unbounded growth
+                    if (sessions.length > 500) sessions.splice(0, sessions.length - 500);
+                    localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+                } catch (e) { /* non-fatal */ }
+            };
+
+            const closeScriptSession = () => {
+                if (!SESSIONS_KEY) return;
+                try {
+                    const sessions = JSON.parse(localStorage.getItem(SESSIONS_KEY) || '[]');
+                    // Find the last unclosed session for this server
+                    for (let i = sessions.length - 1; i >= 0; i--) {
+                        if (sessions[i].serverID === currentServerID && sessions[i].end === null) {
+                            const now = Date.now();
+                            sessions[i].end = now;
+                            sessions[i].endISO = new Date(now).toISOString();
+                            sessions[i].durationSeconds = Math.round((now - sessions[i].start) / 1000);
+                            break;
+                        }
+                    }
+                    localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+                } catch (e) { /* non-fatal */ }
+            };
+
+            startScriptSession();
+
+            // Close session when tab/window is closed or navigated away
+            window.addEventListener('beforeunload', closeScriptSession);
+            // Also catch tab hidden (covers many mobile + minimize cases)
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'hidden') {
+                    closeScriptSession();
+                } else if (document.visibilityState === 'visible') {
+                    // Re-open a session when tab becomes visible again
+                    startScriptSession();
+                }
+            });
+            // ─────────────────────────────────────────────────────────────────
             
             // Verify critical methods exist
             if (typeof serverMonitor.addAlert !== 'function') {
