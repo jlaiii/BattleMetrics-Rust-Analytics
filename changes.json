@@ -1,0 +1,26 @@
+{
+  "versions": [
+    {
+      "version": "1.0.0",
+      "date": "2026-03-28",
+      "notes": "First public release",
+      "changes": [
+        "Real-time player join/leave monitoring with browser sound alerts",
+        "Alert Players — get notified the moment specific players connect or disconnect",
+        "Full activity log with session history, name-change tracking, and powerful filters",
+        "Player Database — persists all seen players with name history and session counts across page loads",
+        "Population statistics: hourly trend tracking and next-hour prediction using linear regression",
+        "Alt account detection using session handoff pattern analysis (relay heuristic)",
+        "Player Notes — add private, persistent notes to any player",
+        "Keep-alive system — prevents background tab throttling with an optional watchdog popup to auto-reopen the tab",
+        "Auto-refresh page on configurable interval",
+        "Auto-update checking against GitHub with toast notification and install link",
+        "Export activity logs, player database, saved players, and alert lists to JSON/CSV",
+        "Import player database to restore or merge historical data",
+        "Manual player add by ID — track players before they appear on your server",
+        "Debug console for advanced diagnostics and log export",
+        "Welcome popup on first install and changelog popup on future updates"
+      ]
+    }
+  ]
+}

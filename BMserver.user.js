@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Server Monitor & Alert System
 // @namespace    http://tampermonkey.net/
-// @version      1.0.9
+// @version      1.0.0
 // @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/servers/*
@@ -47,10 +47,13 @@
     };
 
     // Update/check settings (global)
-    const SCRIPT_VERSION = '1.0.9';
+    const SCRIPT_VERSION = '1.0.0';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
+    const CHANGELOG_URL  = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/changes.json';
     const AUTO_CHECK_KEY = 'bms_auto_check_updates';
+    const WELCOME_SHOWN_KEY = 'bms_welcome_shown';
+    const LAST_VERSION_KEY  = 'bms_last_seen_version';
     let updateAvailable = false;
     let updateAvailableVersion = null;
 
@@ -191,10 +194,12 @@
                     default:
                         console.log(consoleMessage, data);
                 }
-            }
 
-            // Update debug console display if it exists
-            this.updateDebugDisplay();
+                // Debounce debug console display to avoid triggering a DOM rebuild
+                // on every single log() call (can be very frequent during monitoring)
+                clearTimeout(this._displayDebounce);
+                this._displayDebounce = setTimeout(() => this.updateDebugDisplay(), 250);
+            }
         }
 
         error(message, data = null) {
@@ -279,6 +284,7 @@
         }
 
         updateDebugDisplay() {
+            if (!this.enabled) return; // Skip expensive rebuild when debug mode is off
             const debugList = document.getElementById('debug-console-list');
             if (!debugList) return;
 
@@ -318,16 +324,19 @@
         }
 
         getStats() {
-            const stats = {
+            let errorCount = 0, warnCount = 0, infoCount = 0, debugCount = 0;
+            for (const l of this.logs) {
+                if (l.level === 'error') errorCount++;
+                else if (l.level === 'warn') warnCount++;
+                else if (l.level === 'info') infoCount++;
+                else if (l.level === 'debug') debugCount++;
+            }
+            return {
                 totalLogs: this.logs.length,
-                errorCount: this.logs.filter(l => l.level === 'error').length,
-                warnCount: this.logs.filter(l => l.level === 'warn').length,
-                infoCount: this.logs.filter(l => l.level === 'info').length,
-                debugCount: this.logs.filter(l => l.level === 'debug').length,
+                errorCount, warnCount, infoCount, debugCount,
                 oldestLog: this.logs.length > 0 ? this.logs[0].timestamp : null,
                 newestLog: this.logs.length > 0 ? this.logs[this.logs.length - 1].timestamp : null
             };
-            return stats;
         }
 
         getLogsAsText() {
@@ -595,7 +604,7 @@ setInterval(check,2000);
 
     const toRelativeTime = (timestamp) => {
         const now = Date.now();
-        const diff = now - new Date(timestamp).getTime();
+        const diff = now - +timestamp;
         const seconds = Math.floor(diff / 1000);
         const minutes = Math.floor(seconds / 60);
         const hours = Math.floor(minutes / 60);
@@ -659,12 +668,15 @@ setInterval(check,2000);
         }
 
         saveActivityLog() {
-            // Save the full activity log to localStorage (no forced truncation)
-            try {
-                localStorage.setItem(ACTIVITY_LOG_KEY, JSON.stringify(this.activityLog));
-            } catch (e) {
-                console.error('Failed to save activity log to localStorage:', e);
-            }
+            // Debounce to avoid serializing the full log on every single join/leave event
+            clearTimeout(this._activityLogSaveTimeout);
+            this._activityLogSaveTimeout = setTimeout(() => {
+                try {
+                    localStorage.setItem(ACTIVITY_LOG_KEY, JSON.stringify(this.activityLog));
+                } catch (e) {
+                    console.error('Failed to save activity log to localStorage:', e);
+                }
+            }, 2000);
         }
 
         loadSettings() {
@@ -747,13 +759,20 @@ setInterval(check,2000);
         }
 
         clearOldAlerts() {
-            const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+            // Run at most once per hour — avoids a localStorage write on every display refresh
+            const now = Date.now();
+            if (this._lastAlertClean && now - this._lastAlertClean < 3600000) return;
+            this._lastAlertClean = now;
+
+            const oneDayAgo = now - (24 * 60 * 60 * 1000);
+            let dirty = false;
             Object.keys(this.recentAlerts).forEach(alertId => {
                 if (this.recentAlerts[alertId].timestamp < oneDayAgo) {
                     delete this.recentAlerts[alertId];
+                    dirty = true;
                 }
             });
-            this.saveRecentAlerts();
+            if (dirty) this.saveRecentAlerts();
         }
 
         acknowledgeAllAlerts() {
@@ -796,9 +815,7 @@ setInterval(check,2000);
             try {
                 const saved = localStorage.getItem(PLAYER_DATABASE_KEY);
                 if (saved) {
-                    const database = JSON.parse(saved);
-                    console.log(`Loaded ${Object.keys(database).length} players from database`);
-                    return database;
+                    return JSON.parse(saved);
                 }
                 return {};
             } catch (e) {
@@ -813,7 +830,6 @@ setInterval(check,2000);
             this.databaseSaveTimeout = setTimeout(() => {
                 try {
                     localStorage.setItem(PLAYER_DATABASE_KEY, JSON.stringify(this.playerDatabase));
-                    console.log('Player database saved to localStorage');
                 } catch (e) {
                     console.error('Failed to save player database:', e);
                 }
@@ -829,16 +845,8 @@ setInterval(check,2000);
                     const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
                     const filteredHistory = history.filter(entry => entry.timestamp > oneDayAgo);
                     
-                    console.log(`Loaded population history: ${filteredHistory.length} entries from last 24 hours`);
-                    if (filteredHistory.length > 0) {
-                        const oldest = new Date(filteredHistory[0].timestamp).toLocaleString();
-                        const newest = new Date(filteredHistory[filteredHistory.length - 1].timestamp).toLocaleString();
-                        console.log(`Population data range: ${oldest} to ${newest}`);
-                    }
-                    
                     return filteredHistory;
                 }
-                console.log('No population history found in localStorage');
                 return [];
             } catch (e) {
                 console.error('Failed to load population history:', e);
@@ -856,34 +864,14 @@ setInterval(check,2000);
                 
                 localStorage.setItem(POPULATION_HISTORY_KEY, JSON.stringify(this.populationHistory));
                 
-                if (beforeCount !== afterCount) {
-                    console.log(`Population history cleaned: ${beforeCount} -> ${afterCount} entries`);
-                }
+
             } catch (e) {
                 console.error('Failed to save population history:', e);
             }
         }
 
         getActualPopulationFromUI() {
-            // Method 1: Look for "X/Y" pattern (current/max) and take the first number
-            try {
-                const allText = document.body.textContent;
-                const ratioMatches = allText.match(/(\d+)\/(\d+)/g);
-                if (ratioMatches) {
-                    for (const ratio of ratioMatches) {
-                        const [current, max] = ratio.split('/').map(n => parseInt(n));
-                        // Look for reasonable server population ratios
-                        if (current >= 0 && current <= max && max >= 50 && max <= 500) {
-                            console.log(`Found population ratio: ${current}/${max}`);
-                            return current;
-                        }
-                    }
-                }
-            } catch (e) {
-                // Continue
-            }
-            
-            // Method 2: Count actual player rows in the table (most reliable)
+            // Method 1: Count actual player rows in the table (most reliable)
             try {
                 const playerRows = document.querySelectorAll('table tbody tr');
                 let visibleRows = 0;
@@ -893,16 +881,14 @@ setInterval(check,2000);
                         visibleRows++;
                     }
                 });
-                
                 if (visibleRows > 0) {
-                    console.log(`Counted ${visibleRows} player rows in table`);
                     return visibleRows;
                 }
             } catch (e) {
                 // Continue
             }
-            
-            // Method 3: Look for population in page title
+
+            // Method 2: Look for population in page title
             try {
                 const title = document.title;
                 const match = title.match(/(\d+)\/(\d+)/);
@@ -910,21 +896,19 @@ setInterval(check,2000);
                     const current = parseInt(match[1]);
                     const max = parseInt(match[2]);
                     if (current <= max && max >= 50 && max <= 500) {
-                        console.log(`Found population in title: ${current}/${max}`);
                         return current;
                     }
                 }
             } catch (e) {
                 // Continue
             }
-            
-            // Method 4: Look for specific BattleMetrics elements (be very selective)
+
+            // Method 3: Look for specific BattleMetrics elements (be very selective)
             const specificSelectors = [
                 'span[data-testid="server-population"]',
                 '.server-population .current',
                 '[class*="population"] .current'
             ];
-            
             for (const selector of specificSelectors) {
                 try {
                     const element = document.querySelector(selector);
@@ -933,8 +917,7 @@ setInterval(check,2000);
                         const match = text.match(/^(\d+)$/);
                         if (match) {
                             const count = parseInt(match[1]);
-                            if (count >= 0 && count <= 200) { // Be conservative
-                                console.log(`Found population via specific selector "${selector}": ${count}`);
+                            if (count >= 0 && count <= 200) {
                                 return count;
                             }
                         }
@@ -943,8 +926,7 @@ setInterval(check,2000);
                     // Continue
                 }
             }
-            
-            console.log('Could not find actual population from UI, will use tracked count');
+
             return null; // Could not find actual population
         }
 
@@ -958,41 +940,24 @@ setInterval(check,2000);
             let populationToRecord = trackedCount;
             
             if (actualPopulation !== null) {
-                // Only use actual population if it's reasonably close to tracked count
-                // This prevents using wrong numbers like server capacity
                 const difference = Math.abs(actualPopulation - trackedCount);
-                
                 if (difference <= 5 || trackedCount === 0) {
-                    // Small difference or first run - use actual
                     populationToRecord = actualPopulation;
-                    
-                    if (difference > 0) {
-                        console.log(`Population sync: Tracked=${trackedCount}, Actual=${actualPopulation}, Using actual (diff: ${difference})`);
-                    }
-                    
-                    // Update our tracked count to match actual
                     currentPopulation = actualPopulation;
                 } else {
-                    // Large difference - probably wrong UI element, stick with tracked
-                    console.log(`Population mismatch too large: Tracked=${trackedCount}, UI=${actualPopulation}, Using tracked (diff: ${difference})`);
                     populationToRecord = trackedCount;
                 }
-            } else {
-                console.log(`Using tracked population: ${trackedCount} (could not find actual UI count)`);
             }
             
             const entry = {
                 timestamp: now,
                 count: populationToRecord,
-                trackedCount: trackedCount, // Keep for debugging
-                actualCount: actualPopulation, // Keep for debugging
+                trackedCount: trackedCount,
+                actualCount: actualPopulation,
                 date: new Date(now).toLocaleString()
             };
             
             this.populationHistory.push(entry);
-            
-            // Log for debugging
-            console.log(`Population recorded: ${populationToRecord} players at ${entry.date}`);
             
             // Calculate last hour change and prediction
             this.calculatePopulationStats();
@@ -1102,11 +1067,9 @@ setInterval(check,2000);
             const twoHoursAgo = now - (2 * 60 * 60 * 1000);
             const oneHourAgo  = now - (60 * 60 * 1000);
 
-            // Get current population
-            const actualPopulation = this.getActualPopulationFromUI();
-            if (actualPopulation !== null) {
-                currentPopulation = actualPopulation;
-            } else {
+            // currentPopulation is kept up-to-date by recordPopulation() (called every 10s).
+            // Avoid a redundant DOM query here; just fall back to tracked count if unset.
+            if (!currentPopulation) {
                 currentPopulation = this.currentPlayers.size;
             }
 
@@ -1175,19 +1138,24 @@ setInterval(check,2000);
             const oldestEntry = this.populationHistory.length > 0 ? 
                 new Date(this.populationHistory[0].timestamp).toLocaleTimeString() : 'None';
 
-            // Unique players detected per time window (distinct playerIds in activity log)
+            // Unique players in 1/3/6h windows — single pass over the activity log
             const _now = Date.now();
-            const uniqueIn = (ms) => {
-                const cutoff = _now - ms;
-                const ids = new Set();
-                for (const e of this.activityLog) {
-                    if (e.timestamp >= cutoff && e.playerId) ids.add(e.playerId);
+            const _cut1h = _now - 3600000;
+            const _cut3h = _now - 10800000;
+            const _cut6h = _now - 21600000;
+            const _ids1h = new Set(), _ids3h = new Set(), _ids6h = new Set();
+            for (const e of this.activityLog) {
+                if (!e.playerId) continue;
+                const ts = e.timestamp;
+                if (ts >= _cut6h) {
+                    _ids6h.add(e.playerId);
+                    if (ts >= _cut3h) {
+                        _ids3h.add(e.playerId);
+                        if (ts >= _cut1h) _ids1h.add(e.playerId);
+                    }
                 }
-                return ids.size;
-            };
-            const u1h  = uniqueIn(1  * 60 * 60 * 1000);
-            const u3h  = uniqueIn(3  * 60 * 60 * 1000);
-            const u6h  = uniqueIn(6  * 60 * 60 * 1000);
+            }
+            const u1h = _ids1h.size, u3h = _ids3h.size, u6h = _ids6h.size;
             
             popDisplay.innerHTML = `
                 <div style="background: rgba(111, 66, 193, 0.1); padding: 10px; border-radius: 5px; margin-bottom: 10px;">
@@ -1242,14 +1210,10 @@ setInterval(check,2000);
         }
 
         refreshTimestamps() {
-            // Refresh database display timestamps
-            this.updateDatabaseDisplay();
-            
-            // Refresh activity log timestamps
+            // Only refresh the activity log (which shows relative "X min ago" times).
+            // Database and recent alerts are updated by their own cycles; avoid
+            // a full triple-rebuild every 30 s just for timestamp text.
             this.updateActivityDisplay();
-            
-            // Refresh recent alerts timestamps
-            this.updateRecentAlertsDisplay();
         }
 
         addToDatabase(playerId, playerName, skipDisplayUpdate = false) {
@@ -1331,9 +1295,8 @@ setInterval(check,2000);
                 return;
             }
 
-            // Only show if database section is visible to save performance
-            const databaseSection = document.getElementById('player-database-list').parentElement;
-            if (databaseSection && databaseSection.style.display === 'none') return;
+            // Only render if the database list is currently visible (collapsed = style.display:none)
+            if (databaseDiv.style.display === 'none') return;
 
             // Respect the active filter — if one is set, delegate to filterDatabase
             // so background updates don't blow away the user's chosen filter.
@@ -1367,7 +1330,7 @@ setInterval(check,2000);
         }
 
         renderDatabasePlayers(players, container) {
-            let databaseHTML = '';
+            const parts = [];
             players.forEach(player => {
                 const lastSeenTime = toRelativeTime(player.lastSeen);
                 const hasAlert = this.alerts[player.id];
@@ -1387,7 +1350,7 @@ setInterval(check,2000);
                     '<span style="color: #28a745; font-weight: bold;">[ONLINE]</span>' : 
                     '<span style="color: #dc3545; font-weight: bold;">[OFFLINE]</span>';
                 
-                databaseHTML += `
+                parts.push(`
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(111, 66, 193, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#6f42c1'};">
                         <div style="flex: 1;">
                             <div style="color: #6f42c1; font-weight: bold; font-size: 12px;">
@@ -1431,10 +1394,10 @@ setInterval(check,2000);
                             </button>
                         </div>
                     </div>
-                `;
+                `);
             });
 
-            container.innerHTML = databaseHTML;
+            container.innerHTML = parts.join('');
         }
 
         searchDatabase(query) {
@@ -1475,40 +1438,23 @@ setInterval(check,2000);
 
         addAlert(playerName, playerId, alertType = 'both') {
             try {
-                console.log('[Alert System] Adding alert for:', playerName, playerId);
                 this.alerts[playerId] = {
                     name: playerName,
-                    type: alertType, // 'join', 'leave', 'both'
+                    type: alertType,
                     added: Date.now()
                 };
                 this.saveAlerts();
-                console.log('[Alert System] Alert added. Total alerts:', Object.keys(this.alerts).length);
-                console.log('[Alert System] Current alerts:', this.alerts);
-                
-                // Immediately update the display
-                console.log('[Alert System] Calling updateAlertDisplay...');
                 this.updateAlertDisplay();
-                
-                console.log('[Alert System] Calling updateAlertCount...');
                 this.updateAlertCount();
-                
-                // Ensure Alert Players section is expanded when alert is added
-                console.log('[Alert System] Calling expandAlertSection...');
                 this.expandAlertSection();
-                
-                console.log('[Alert System] addAlert completed successfully');
             } catch (error) {
-                console.error('[Alert System] Error in addAlert:', error);
+                if (debugConsole && debugConsole.enabled) debugConsole.error('[Alert System] Error in addAlert', error);
             }
         }
 
         removeAlert(playerId) {
-            console.log('[Alert System] Removing alert for:', playerId);
             delete this.alerts[playerId];
             this.saveAlerts();
-            console.log('[Alert System] Alert removed. Total alerts:', Object.keys(this.alerts).length);
-            
-            // Immediately update the display
             this.updateAlertDisplay();
             this.updateAlertCount();
         }
@@ -1546,16 +1492,22 @@ setInterval(check,2000);
             // any newly-detectable handoff pairs get logged to the activity feed.
             // – On 'joined': catches the real-time B→A handoff (B left, A just joined).
             // – On 'left':   catches any A→B pattern that has built up over prior sessions.
+            // Rate-limited to at most once per 30 seconds per player to avoid O(n²) spam.
             if (action === 'joined' || action === 'left') {
-                setTimeout(() => {
-                    try {
-                        const alts = detectAlts(playerId);
-                        for (const alt of alts) {
-                            const altName = alt.player.currentName || `Player ${alt.playerId}`;
-                            this.logAltDetection(playerId, playerName, alt.playerId, altName, alt.matches, alt.coverage);
-                        }
-                    } catch (_) { /* detectAlts not yet defined on very first event */ }
-                }, 0);
+                if (!this._altsScanTs) this._altsScanTs = {};
+                const _nowAlt = Date.now();
+                if (_nowAlt - (this._altsScanTs[playerId] || 0) > 30000) {
+                    this._altsScanTs[playerId] = _nowAlt;
+                    setTimeout(() => {
+                        try {
+                            const alts = detectAlts(playerId);
+                            for (const alt of alts) {
+                                const altName = alt.player.currentName || `Player ${alt.playerId}`;
+                                this.logAltDetection(playerId, playerName, alt.playerId, altName, alt.matches, alt.coverage);
+                            }
+                        } catch (_) { /* detectAlts not yet defined on very first event */ }
+                    }, 0);
+                }
             }
 
             // Debounce activity display updates to reduce lag
@@ -1770,7 +1722,7 @@ setInterval(check,2000);
                     oscillator.stop(now + 0.5);
                 }
 
-                console.log('Alert sound played successfully (choice:', choice, ')');
+
             } catch (e) {
                 console.log('Could not play alert sound:', e);
                 // Fallback: try to use a simple beep
@@ -1820,12 +1772,12 @@ setInterval(check,2000);
                 this.updatePopulationDisplay();
             }, 60000); // 1 minute
             
-            // Refresh timestamps every 30 seconds to keep "X minutes ago" current
+            // Refresh timestamps every 60 seconds to keep "X minutes ago" current
             timestampRefreshInterval = setInterval(() => {
                 this.refreshTimestamps();
-            }, 30000); // 30 seconds
+            }, 60000); // 60 seconds
             
-            console.log('Started monitoring server:', currentServerID);
+
         }
 
         stopMonitoring() {
@@ -1842,7 +1794,7 @@ setInterval(check,2000);
                 clearInterval(timestampRefreshInterval);
                 timestampRefreshInterval = null;
             }
-            console.log('Stopped monitoring');
+
         }
 
         updatePlayerList(isInitialLoad = false) {
@@ -1908,7 +1860,6 @@ setInterval(check,2000);
                 
                 // Start processing
                 if (isInitialLoad && playerRows.length > batchSize) {
-                    console.log(`Processing ${playerRows.length} players in batches of ${batchSize}...`);
                     processBatch();
                 } else {
                     // Process all at once for smaller lists or regular updates
@@ -1960,7 +1911,6 @@ setInterval(check,2000);
                 // On first run, use last saved state if available
                 if (lastPlayerList.size === 0 && this.lastPlayerState.size > 0) {
                     comparisonList = this.lastPlayerState;
-                    console.log('Using last saved player state for comparison');
                 }
                 
                 if (comparisonList.size > 0) {
@@ -2000,7 +1950,7 @@ setInterval(check,2000);
                     this.updateSavedPlayersDisplay();
                 }
                 
-                console.log(`Player list updated: ${newPlayerList.size} players processed`);
+
             } catch (e) {
                 console.error('Error finishing player list update:', e);
             }
@@ -2038,24 +1988,15 @@ setInterval(check,2000);
         
         hideLoadingIndicator() {
             // Loading indicator will be replaced by actual content in updatePlayerDisplay
-            console.log('Initial loading completed');
         }
 
         syncPopulationCount() {
             const actualPopulation = this.getActualPopulationFromUI();
             const trackedPopulation = this.currentPlayers.size;
-            
             if (actualPopulation !== null) {
                 const difference = Math.abs(actualPopulation - trackedPopulation);
-                
-                console.log(`Population sync check: Tracked=${trackedPopulation}, UI=${actualPopulation}, Difference=${difference}`);
-                
-                // Only sync if the difference is small (1-3 players) to avoid using wrong UI elements
                 if (difference >= 1 && difference <= 3) {
-                    console.log(`Small drift detected, correcting: ${trackedPopulation} -> ${actualPopulation}`);
-                    this.recordPopulation(trackedPopulation); // This will use actual population internally
-                } else if (difference > 3) {
-                    console.log(`Large difference detected, likely wrong UI element. Keeping tracked count.`);
+                    this.recordPopulation(trackedPopulation);
                 }
             }
         }
@@ -2170,9 +2111,7 @@ setInterval(check,2000);
         updateAlertCount() {
             const alertCountSpan = document.getElementById('alert-count');
             if (alertCountSpan) {
-                const count = Object.keys(this.alerts).length;
-                alertCountSpan.textContent = count;
-                console.log('[Alert System] Updated alert count to:', count);
+                alertCountSpan.textContent = Object.keys(this.alerts).length;
             }
         }
 
@@ -2184,31 +2123,20 @@ setInterval(check,2000);
                 if (alertList.style.display === 'none') {
                     alertList.style.display = 'block';
                     alertToggle.textContent = '▼';
-                    console.log('[Alert System] Expanded Alert Players section');
                 }
             }
         }
 
         updateAlertDisplay() {
             try {
-                console.log('[Alert System] Updating alert display...');
                 const alertDiv = document.getElementById('alert-players-list');
-                if (!alertDiv) {
-                    console.log('[Alert System] Alert div not found!');
-                    return;
-                }
+                if (!alertDiv) return;
 
                 const alertedPlayers = Object.keys(this.alerts);
-                console.log('[Alert System] Alerted players count:', alertedPlayers.length);
-                console.log('[Alert System] Alerted players:', alertedPlayers);
-                
                 if (alertedPlayers.length === 0) {
                     alertDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No players with alerts</div>';
-                    console.log('[Alert System] No alerts to display');
                     return;
                 }
-
-                console.log('[Alert System] Generating HTML for alerts...');
                 let alertHTML = '';
                 alertedPlayers.forEach(playerId => {
                     const alert = this.alerts[playerId];
@@ -2281,13 +2209,9 @@ setInterval(check,2000);
                     `;
                 });
 
-                console.log('[Alert System] Setting innerHTML with', alertHTML.length, 'characters');
                 alertDiv.innerHTML = alertHTML;
-                console.log('[Alert System] Alert display updated successfully');
-                
             } catch (error) {
-                console.error('[Alert System] Error in updateAlertDisplay:', error);
-                return;
+                if (debugConsole && debugConsole.enabled) debugConsole.error('[Alert System] Error in updateAlertDisplay:', error);
             }
         }
 
@@ -2504,7 +2428,7 @@ setInterval(check,2000);
                     toggle.textContent = '▼';
                 }
                 
-                console.log('Moved Recent Alerts to top due to unacknowledged alerts');
+
                 
             } else if (!hasUnacknowledgedAlerts && currentlyAtTop) {
                 // Move Recent Alerts back to original position (after Player Database)
@@ -2518,7 +2442,7 @@ setInterval(check,2000);
                 recentAlertsSection.style.boxShadow = 'none';
                 recentAlertsSection.style.animation = 'none';
                 
-                console.log('Moved Recent Alerts back to original position');
+
             }
         }
 
@@ -2564,25 +2488,12 @@ setInterval(check,2000);
     // Add global click handler for better Firefox compatibility
     document.addEventListener('click', (event) => {
         const target = event.target;
-        console.log('[Click Handler] Button clicked:', target.textContent, target.onclick ? 'has onclick' : 'no onclick');
-        
-        // Handle alert buttons
         if (target.onclick && target.onclick.toString().includes('togglePlayerAlert')) {
-            console.log('[Click Handler] Alert button detected');
             event.preventDefault();
-            
-            // Extract parameters from onclick attribute
             const onclickStr = target.onclick.toString();
-            console.log('[Click Handler] onclick string:', onclickStr);
             const match = onclickStr.match(/togglePlayerAlert\('([^']+)',\s*'([^']+)'\)/);
-            
             if (match) {
-                const playerName = match[1];
-                const playerId = match[2];
-                console.log('[Click Handler] Extracted params:', playerName, playerId);
-                window.togglePlayerAlert(playerName, playerId);
-            } else {
-                console.log('[Click Handler] Failed to extract parameters from onclick');
+                window.togglePlayerAlert(match[1], match[2]);
             }
         }
     });
@@ -2896,10 +2807,14 @@ setInterval(check,2000);
                                            onchange="toggleAutoCheckUpdates(this.checked)" style="margin-right: 8px;">
                                     Auto-check for updates
                                 </label>
-                                <div style="margin-top:6px; display:flex; gap:6px;">
+                                <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
                                     <button onclick="checkForUpdatesNow()"
                                             style="background: #007bff; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 11px;">
                                         Check for updates
+                                    </button>
+                                    <button onclick="window.showChangelogModal()"
+                                            style="background: #6f42c1; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                                        View Changelog
                                     </button>
                                 </div>
                         <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 4px; margin-top: 8px;">
@@ -3030,15 +2945,20 @@ setInterval(check,2000);
                 </div>
             </div>
 
-            <!-- Version Info -->
-            <div style="text-align: center; padding: 10px; border-top: 1px solid rgba(255,255,255,0.2); margin-top: 10px;">
-                <div style="font-size: 11px; color: #6c757d; opacity: 0.9; margin-bottom:6px;">
-                    ${`BattleMetrics Server Monitor v${SCRIPT_VERSION}`}
+            <!-- Version Info + Donate -->
+            <div style="text-align: center; padding: 12px; border-top: 1px solid rgba(255,255,255,0.2); margin-top: 10px;">
+                <div style="font-size: 11px; color: #6c757d; opacity: 0.9; margin-bottom: 6px;">
+                    BattleMetrics Server Monitor v${SCRIPT_VERSION}
                 </div>
-                <div style="font-size: 12px;">
-                    <a href="https://discord.gg/bEPn9UH9Xw" target="_blank" rel="noopener" style="color:#5865F2; font-weight:600; text-decoration:none; margin-right:12px;">Discord</a>
-                    <a href="https://jlaiii.github.io/BattleMetrics-Rust-Analytics/" target="_blank" rel="noopener" style="color:#8892BF; font-weight:600; text-decoration:none;">GitHub</a>
+                <div style="font-size: 12px; margin-bottom: 10px;">
+                    <a href="https://discord.gg/bEPn9UH9Xw" target="_blank" rel="noopener" style="color:#5865F2; font-weight:600; text-decoration:none; margin-right:10px;">💬 Discord</a>
+                    <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" rel="noopener" style="color:#8892BF; font-weight:600; text-decoration:none; margin-right:10px;">⭐ GitHub</a>
+                    <span onclick="window.showChangelogModal()" style="color:#6c757d; font-size:11px; cursor:pointer; text-decoration:underline;">Changelog</span>
                 </div>
+                <button onclick="window.showDonateModal()"
+                        style="background:linear-gradient(135deg,#f6c90e,#e9a200);color:#000;border:none;padding:8px 0;border-radius:20px;cursor:pointer;font-weight:bold;font-size:12px;width:100%;box-shadow:0 2px 10px rgba(230,162,0,0.3);letter-spacing:0.3px;">
+                    ☕ Keep the project alive — Donate
+                </button>
             </div>
         `;
 
@@ -4918,27 +4838,31 @@ setInterval(check,2000);
             });
         }
 
-        // Sort most recent first (full list, no arbitrary cap)
+        // Sort most recent first — cap to 500 entries to keep the DOM lean
+        const MAX_ACTIVITY_DISPLAY = 500;
         const sorted = filtered.slice().reverse();
+        const displayEntries = sorted.length > MAX_ACTIVITY_DISPLAY ? sorted.slice(0, MAX_ACTIVITY_DISPLAY) : sorted;
 
         // Update result count
         const countEl = document.getElementById('activity-result-count');
         if (countEl) {
             const total = serverMonitor.activityLog.length;
-            if (sorted.length === total) {
+            if (sorted.length === total && displayEntries.length === total) {
                 countEl.textContent = `${total} total entries`;
+            } else if (displayEntries.length < sorted.length) {
+                countEl.textContent = `Showing ${displayEntries.length} of ${sorted.length} (filtered from ${total} total)`;
             } else {
-                countEl.textContent = `Showing ${sorted.length} of ${total} entries`;
+                countEl.textContent = `Showing ${displayEntries.length} of ${total} entries`;
             }
         }
 
-        if (sorted.length === 0) {
+        if (displayEntries.length === 0) {
             activityDiv.innerHTML = '<div style="opacity: 0.7; font-style: italic;">No activity matches filter</div>';
             return;
         }
 
         let activityHTML = '';
-        sorted.forEach(entry => {
+        displayEntries.forEach(entry => {
             activityHTML += buildActivityEntryHTML(entry);
         });
 
@@ -5482,6 +5406,281 @@ setInterval(check,2000);
 
 
 
+    // ── Welcome, Donate & Changelog System ────────────────────────────────────
+
+    window.showDonateModal = () => {
+        const existing = document.getElementById('bms-donate-modal');
+        if (existing) existing.remove();
+
+        const LTC_ADDRESS = 'ltc1qvwf0jf7308ry9xehf3yv0v6zq5wngjwk62ayp3';
+
+        const modal = document.createElement('div');
+        modal.id = 'bms-donate-modal';
+        modal.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.78);z-index:30001;display:flex;align-items:center;justify-content:center;';
+        modal.addEventListener('mousedown', (e) => { if (e.target === modal) modal.remove(); });
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#2c3e50;color:white;padding:24px;border-radius:12px;width:430px;max-width:95vw;box-shadow:0 8px 40px rgba(0,0,0,0.65);border:1px solid #34495e;';
+        box.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                <div style="font-size:18px;font-weight:bold;color:#ffc107;">☕ Support the Project</div>
+                <button onclick="document.getElementById('bms-donate-modal').remove()" style="background:transparent;color:#aaa;border:none;font-size:18px;cursor:pointer;line-height:1;padding:0 2px;">✕</button>
+            </div>
+            <div style="color:#adb5bd;font-size:13px;margin-bottom:16px;line-height:1.65;">
+                This script is <strong style="color:#e9ecef;">free and open source</strong>. If it saves you time tracking players, any donation helps support ongoing development and keeps the project alive!
+            </div>
+            <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.35);border-radius:8px;padding:14px;margin-bottom:16px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                    <span style="font-size:22px;">🪙</span>
+                    <span style="color:#ffc107;font-weight:bold;font-size:14px;">Litecoin (LTC)</span>
+                </div>
+                <div style="background:rgba(0,0,0,0.3);border-radius:6px;padding:10px;display:flex;align-items:center;gap:8px;">
+                    <code style="color:#e9ecef;font-size:11px;flex:1;word-break:break-all;font-family:monospace;line-height:1.5;">${LTC_ADDRESS}</code>
+                    <button id="bms-copy-ltc-btn"
+                            onclick="(function(btn){navigator.clipboard.writeText('${LTC_ADDRESS}').then(()=>{btn.textContent='✓ Copied';btn.style.background='#28a745';btn.style.color='white';setTimeout(()=>{btn.textContent='Copy';btn.style.background='#ffc107';btn.style.color='#000';},2000)}).catch(()=>{btn.textContent='Copied';setTimeout(()=>{btn.textContent='Copy';},2000)})})(this)"
+                            style="background:#ffc107;color:#000;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:bold;white-space:nowrap;flex-shrink:0;">
+                        Copy
+                    </button>
+                </div>
+            </div>
+            <div style="text-align:center;">
+                <div style="color:#6c757d;font-size:11px;margin-bottom:10px;">❤️ Thank you for your support!</div>
+                <a href="https://discord.gg/bEPn9UH9Xw" target="_blank" rel="noopener" style="color:#5865F2;text-decoration:none;font-size:12px;font-weight:600;">💬 Discord</a>
+                &nbsp;&nbsp;·&nbsp;&nbsp;
+                <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" rel="noopener" style="color:#8892BF;text-decoration:none;font-size:12px;font-weight:600;">⭐ GitHub</a>
+            </div>
+        `;
+        modal.appendChild(box);
+        document.body.appendChild(modal);
+    };
+
+    window.showChangelogModal = async () => {
+        const existing = document.getElementById('bms-changelog-modal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'bms-changelog-modal';
+        modal.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.78);z-index:30000;display:flex;align-items:center;justify-content:center;';
+        modal.addEventListener('mousedown', (e) => { if (e.target === modal) modal.remove(); });
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#2c3e50;color:white;padding:22px;border-radius:12px;width:500px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,0.65);border:1px solid #34495e;';
+
+        const hdr = document.createElement('div');
+        hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-shrink:0;';
+        hdr.innerHTML = `<div style="font-size:16px;font-weight:bold;color:#17a2b8;">📋 Changelog</div>`;
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = '✕';
+        closeBtn.style.cssText = 'background:transparent;color:#aaa;border:none;font-size:18px;cursor:pointer;line-height:1;padding:0 2px;';
+        closeBtn.onclick = () => modal.remove();
+        hdr.appendChild(closeBtn);
+
+        const content = document.createElement('div');
+        content.style.cssText = 'overflow-y:auto;flex:1;font-size:13px;padding-right:4px;';
+        content.innerHTML = '<div style="text-align:center;color:#6c757d;padding:24px;"><div style="font-size:24px;margin-bottom:8px;">⏳</div>Loading changelog…</div>';
+
+        box.appendChild(hdr);
+        box.appendChild(content);
+        modal.appendChild(box);
+        document.body.appendChild(modal);
+
+        try {
+            const resp = await fetch(CHANGELOG_URL, { cache: 'no-cache' });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            if (!data.versions || !data.versions.length) {
+                content.innerHTML = '<div style="color:#dc3545;padding:10px;">No changelog data found.</div>';
+                return;
+            }
+            let html = '';
+            for (const v of data.versions) {
+                const isCurrent = v.version === SCRIPT_VERSION;
+                html += `
+                    <div style="margin-bottom:14px;padding:14px;background:rgba(255,255,255,0.04);border-radius:8px;border-left:3px solid ${isCurrent ? '#17a2b8' : '#495057'};">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                            <span style="font-weight:bold;color:${isCurrent ? '#17a2b8' : '#e9ecef'};font-size:15px;">v${v.version}</span>
+                            <div style="display:flex;gap:8px;align-items:center;">
+                                ${isCurrent ? '<span style="background:#17a2b8;color:#fff;font-size:10px;padding:2px 8px;border-radius:10px;">CURRENT</span>' : ''}
+                                ${v.date ? `<span style="color:#6c757d;font-size:11px;">${v.date}</span>` : ''}
+                            </div>
+                        </div>
+                        ${v.notes ? `<div style="color:#adb5bd;font-size:12px;margin-bottom:8px;font-style:italic;">${v.notes.replace(/</g,'&lt;')}</div>` : ''}
+                        <ul style="margin:0;padding-left:16px;">
+                            ${(v.changes || []).map(c => `<li style="color:#e9ecef;font-size:12px;margin-bottom:3px;">${c.replace(/</g,'&lt;')}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+            content.innerHTML = html;
+        } catch (e) {
+            content.innerHTML = `<div style="color:#dc3545;padding:10px;">Failed to load changelog: ${e.message || e}</div>`;
+        }
+    };
+
+    const showWelcomePopup = () => {
+        const modal = document.createElement('div');
+        modal.id = 'bms-welcome-modal';
+        modal.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.82);z-index:30000;display:flex;align-items:center;justify-content:center;';
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#2c3e50;color:white;padding:26px;border-radius:12px;width:490px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 10px 50px rgba(0,0,0,0.75);border:1px solid #34495e;';
+        box.innerHTML = `
+            <div style="text-align:center;margin-bottom:20px;">
+                <div style="font-size:36px;margin-bottom:10px;">🎯</div>
+                <h2 style="margin:0 0 6px;color:#17a2b8;font-size:20px;">Welcome to BattleMetrics Server Monitor</h2>
+                <div style="color:#6c757d;font-size:12px;">v${SCRIPT_VERSION} · First Public Release</div>
+            </div>
+            <div style="background:rgba(23,162,184,0.1);border:1px solid rgba(23,162,184,0.35);border-radius:8px;padding:14px;margin-bottom:16px;font-size:13px;line-height:1.65;color:#e9ecef;">
+                <strong style="color:#17a2b8;display:block;margin-bottom:6px;">What is this script?</strong>
+                A free Tampermonkey userscript that supercharges BattleMetrics. Track real-time player join/leave events, set alerts for specific players, build a persistent player history database, detect alt accounts, and analyze server population trends — all running directly in your browser with zero external servers.
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;">
+                <div style="background:rgba(40,167,69,0.08);border:1px solid rgba(40,167,69,0.25);border-radius:6px;padding:10px;font-size:12px;">
+                    <div style="color:#28a745;font-weight:bold;margin-bottom:4px;">🔔 Real-time alerts</div>
+                    <div style="color:#adb5bd;">Get notified when tracked players join or leave</div>
+                </div>
+                <div style="background:rgba(111,66,193,0.08);border:1px solid rgba(111,66,193,0.25);border-radius:6px;padding:10px;font-size:12px;">
+                    <div style="color:#9b6fe0;font-weight:bold;margin-bottom:4px;">🗃 Player database</div>
+                    <div style="color:#adb5bd;">Name changes, sessions &amp; history tracking</div>
+                </div>
+                <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.25);border-radius:6px;padding:10px;font-size:12px;">
+                    <div style="color:#ffc107;font-weight:bold;margin-bottom:4px;">🔍 Alt detection</div>
+                    <div style="color:#adb5bd;">Spot account-switching patterns automatically</div>
+                </div>
+                <div style="background:rgba(23,162,184,0.08);border:1px solid rgba(23,162,184,0.25);border-radius:6px;padding:10px;font-size:12px;">
+                    <div style="color:#17a2b8;font-weight:bold;margin-bottom:4px;">📊 Population stats</div>
+                    <div style="color:#adb5bd;">Trends and next-hour predictions</div>
+                </div>
+            </div>
+            <div style="display:flex;justify-content:center;gap:10px;margin-bottom:16px;">
+                <a href="https://discord.gg/bEPn9UH9Xw" target="_blank" rel="noopener"
+                   style="display:inline-flex;align-items:center;gap:6px;background:#5865F2;color:white;text-decoration:none;padding:9px 18px;border-radius:6px;font-weight:bold;font-size:13px;">
+                    💬 Join Discord
+                </a>
+                <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" rel="noopener"
+                   style="display:inline-flex;align-items:center;gap:6px;background:#24292e;color:white;text-decoration:none;padding:9px 18px;border-radius:6px;font-weight:bold;font-size:13px;">
+                    ⭐ GitHub
+                </a>
+            </div>
+            <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.35);border-radius:8px;padding:14px;margin-bottom:18px;text-align:center;">
+                <div style="color:#ffc107;font-weight:bold;margin-bottom:6px;font-size:14px;">☕ Keep the project alive</div>
+                <div style="color:#adb5bd;font-size:12px;margin-bottom:12px;line-height:1.5;">This script is completely free. If it saves you time, consider a small donation to support ongoing development.</div>
+                <button onclick="document.getElementById('bms-welcome-modal').remove(); window.showDonateModal();"
+                        style="background:linear-gradient(135deg,#ffc107,#e9a200);color:#000;border:none;padding:8px 22px;border-radius:20px;cursor:pointer;font-weight:bold;font-size:13px;box-shadow:0 2px 10px rgba(230,162,0,0.35);">
+                    💰 Donate / Support
+                </button>
+            </div>
+            <div style="text-align:center;">
+                <button onclick="document.getElementById('bms-welcome-modal').remove()"
+                        style="background:#17a2b8;color:white;border:none;padding:10px 40px;border-radius:8px;cursor:pointer;font-weight:bold;font-size:14px;box-shadow:0 2px 10px rgba(23,162,184,0.3);">
+                    🚀 Get Started
+                </button>
+            </div>
+        `;
+        modal.appendChild(box);
+        document.body.appendChild(modal);
+    };
+
+    const showUpdatePopup = async (newVersion) => {
+        const existing = document.getElementById('bms-update-popup-modal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'bms-update-popup-modal';
+        modal.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.78);z-index:30000;display:flex;align-items:center;justify-content:center;';
+        modal.addEventListener('mousedown', (e) => { if (e.target === modal) modal.remove(); });
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#2c3e50;color:white;padding:22px;border-radius:12px;width:490px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,0.65);border:1px solid #34495e;';
+
+        const hdr = document.createElement('div');
+        hdr.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-shrink:0;';
+        hdr.innerHTML = `
+            <div>
+                <div style="font-size:17px;font-weight:bold;color:#28a745;">🎉 Updated to v${newVersion}!</div>
+                <div style="font-size:12px;color:#6c757d;margin-top:3px;">Here's what's new in this release</div>
+            </div>
+        `;
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = '✕';
+        closeBtn.style.cssText = 'background:transparent;color:#aaa;border:none;font-size:18px;cursor:pointer;line-height:1;padding:0 2px;align-self:flex-start;';
+        closeBtn.onclick = () => modal.remove();
+        hdr.appendChild(closeBtn);
+
+        const content = document.createElement('div');
+        content.style.cssText = 'overflow-y:auto;flex:1;font-size:13px;padding-right:4px;margin-bottom:14px;';
+        content.innerHTML = '<div style="text-align:center;color:#6c757d;padding:20px;">⏳ Loading changes…</div>';
+
+        const footer = document.createElement('div');
+        footer.style.cssText = 'flex-shrink:0;text-align:center;padding-top:4px;';
+        footer.innerHTML = `
+            <button onclick="document.getElementById('bms-update-popup-modal').remove()"
+                    style="background:#28a745;color:white;border:none;padding:8px 28px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:13px;margin-right:8px;">
+                Sweet, thanks! 🎯
+            </button>
+            <button onclick="window.showDonateModal()"
+                    style="background:linear-gradient(135deg,#ffc107,#e9a200);color:#000;border:none;padding:8px 18px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:12px;">
+                ☕ Donate
+            </button>
+        `;
+
+        box.appendChild(hdr);
+        box.appendChild(content);
+        box.appendChild(footer);
+        modal.appendChild(box);
+        document.body.appendChild(modal);
+
+        try {
+            const resp = await fetch(CHANGELOG_URL, { cache: 'no-cache' });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            if (!data.versions || !data.versions.length) {
+                content.innerHTML = '<div style="color:#6c757d;padding:10px;">No changelog available.</div>';
+                return;
+            }
+            let html = '';
+            for (const v of data.versions) {
+                const isCurrent = v.version === SCRIPT_VERSION;
+                html += `
+                    <div style="margin-bottom:14px;padding:14px;background:rgba(255,255,255,0.04);border-radius:8px;border-left:3px solid ${isCurrent ? '#28a745' : '#495057'};">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                            <span style="font-weight:bold;color:${isCurrent ? '#28a745' : '#e9ecef'};font-size:14px;">v${v.version}</span>
+                            <div style="display:flex;gap:8px;align-items:center;">
+                                ${isCurrent ? '<span style="background:#28a745;color:#fff;font-size:10px;padding:2px 8px;border-radius:10px;">NEW</span>' : ''}
+                                ${v.date ? `<span style="color:#6c757d;font-size:11px;">${v.date}</span>` : ''}
+                            </div>
+                        </div>
+                        ${v.notes ? `<div style="color:#adb5bd;font-size:12px;margin-bottom:8px;font-style:italic;">${v.notes.replace(/</g,'&lt;')}</div>` : ''}
+                        <ul style="margin:0;padding-left:16px;">
+                            ${(v.changes || []).map(c => `<li style="color:#e9ecef;font-size:12px;margin-bottom:3px;">${c.replace(/</g,'&lt;')}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+            content.innerHTML = html;
+        } catch (e) {
+            content.innerHTML = `<div style="color:#6c757d;padding:10px;">Could not load detailed changes: ${e.message || e}</div>`;
+        }
+    };
+
+    const checkWelcomeOrUpdate = () => {
+        const welcomed = localStorage.getItem(WELCOME_SHOWN_KEY);
+        const lastVersion = localStorage.getItem(LAST_VERSION_KEY);
+        if (!welcomed) {
+            // First install ever — show welcome popup
+            localStorage.setItem(WELCOME_SHOWN_KEY, 'true');
+            localStorage.setItem(LAST_VERSION_KEY, SCRIPT_VERSION);
+            setTimeout(() => showWelcomePopup(), 1800);
+        } else if (lastVersion && lastVersion !== SCRIPT_VERSION) {
+            // User has updated to a new version — show what's new popup
+            localStorage.setItem(LAST_VERSION_KEY, SCRIPT_VERSION);
+            setTimeout(() => showUpdatePopup(SCRIPT_VERSION), 1800);
+        } else if (!lastVersion) {
+            // Welcomed before but version key missing — record silently
+            localStorage.setItem(LAST_VERSION_KEY, SCRIPT_VERSION);
+        }
+    };
+
     // Cleanup function to remove UI elements when leaving server pages
     const cleanup = () => {
         // Stop monitoring
@@ -5851,7 +6050,7 @@ setInterval(check,2000);
             // Also update the alert and saved displays to show current online/offline status
             serverMonitor.updateAlertDisplay();
             serverMonitor.updateSavedPlayersDisplay();
-        }, 3000); // Reduced from 1000ms to 3000ms
+        }, 5000); // Reduced from 3000ms to 5000ms
 
         // Initialize displays
         setTimeout(() => {
@@ -6003,7 +6202,7 @@ setInterval(check,2000);
         // Set up interval to check for server page changes
         autoInitInterval = setInterval(() => {
             checkAndInitializeServer();
-        }, 1000); // Check every 1 second
+        }, 2000); // Check every 2 seconds
     };
 
     const stopAutoInit = () => {
@@ -6051,7 +6250,10 @@ setInterval(check,2000);
     // Start auto-initialization system
     console.log('BattleMetrics Monitor - Starting auto-initialization system...');
     startAutoInit();
-    
+
+    // Show welcome popup on first install, or update popup when version changes
+    setTimeout(checkWelcomeOrUpdate, 2500);
+
     // That's it! Now it should catch SPA navigation!
     
 
