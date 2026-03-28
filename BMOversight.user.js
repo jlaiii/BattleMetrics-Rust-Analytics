@@ -36,6 +36,7 @@
     let LAST_PLAYER_STATE_KEY = '';
     let SESSIONS_KEY = '';
     let NOTES_KEY = '';
+    let TAGS_KEY = '';
 
     // Function to initialize server-specific keys
     const initializeStorageKeys = (serverID) => {
@@ -49,6 +50,7 @@
         LAST_PLAYER_STATE_KEY = `bms_last_player_state_${serverID}`;
         SESSIONS_KEY = `bms_script_sessions_${serverID}`;
         NOTES_KEY = `bms_player_notes_${serverID}`;
+        TAGS_KEY = `bms_player_tags_${serverID}`;
     };
 
     // Update/check settings (global)
@@ -56,6 +58,21 @@
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
     const CHANGELOG_URL  = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/changes.json';
+
+    // Player tag preset colors
+    const TAG_COLORS = {
+        'Cheater':  '#dc3545',
+        'Squad':    '#6f42c1',
+        'Admin':    '#fd7e14',
+        'Friendly': '#28a745',
+        'Toxic':    '#e83e8c',
+        'Watch':    '#ffc107',
+    };
+    const TAG_PRESETS = Object.keys(TAG_COLORS);
+    const getTagColor = (tag) => TAG_COLORS[tag] || '#17a2b8';
+    const renderTagBadges = (tags) => tags.map(t =>
+        `<span style="display:inline-block;background:${getTagColor(t)};color:white;font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px;margin-left:3px;">${t.replace(/</g,'&lt;')}</span>`
+    ).join('');
     const AUTO_CHECK_KEY = 'bms_auto_check_updates';
     const WELCOME_SHOWN_KEY = 'bms_welcome_shown';
 
@@ -400,11 +417,6 @@ User Agent: ${navigator.userAgent}
     // Auto-refresh settings keys (global, not server-specific)
     const AUTO_REFRESH_ENABLED_KEY = 'bms_auto_refresh_enabled';
     const AUTO_REFRESH_MS_KEY = 'bms_auto_refresh_ms';
-    const KEEP_ALIVE_KEY = 'bms_keep_alive_enabled';
-    const KEEP_ALIVE_URL_KEY = 'bms_keep_alive_url';
-    const KEEP_ALIVE_HEARTBEAT_KEY = 'bms_watchdog_heartbeat';
-    const KEEP_ALIVE_LOCK_KEY = 'bms_watchdog_lock';
-    const KEEP_ALIVE_DISPLAY_KEY = 'bms_watchdog_display';
 
     const loadAutoRefreshSettings = () => ({
         enabled: localStorage.getItem(AUTO_REFRESH_ENABLED_KEY) === 'true',
@@ -419,7 +431,6 @@ User Agent: ${navigator.userAgent}
     const startAutoRefresh = (ms) => {
         stopAutoRefresh();
         autoRefreshIntervalId = setInterval(() => {
-            suppressKeepAliveGuard = true;
             location.reload();
         }, ms);
     };
@@ -429,251 +440,6 @@ User Agent: ${navigator.userAgent}
             clearInterval(autoRefreshIntervalId);
             autoRefreshIntervalId = null;
         }
-    };
-
-    // ── Keep-Alive System ──────────────────────────────────────────────────────
-    // Prevents background tab throttling, warns before close, and opens a
-    // watchdog popup that auto-reopens this tab if it is accidentally closed.
-    let keepAliveAudioCtx = null;
-    let keepAliveBeforeUnload = null;
-    let keepAlivePopup = null;
-    let keepAliveHeartbeatInterval = null;
-    let suppressKeepAliveGuard = false; // set true before intentional reloads
-
-    const startKeepAliveHeartbeat = () => {
-        if (keepAliveHeartbeatInterval) return;
-        localStorage.setItem(KEEP_ALIVE_HEARTBEAT_KEY, Date.now());
-        keepAliveHeartbeatInterval = setInterval(() => {
-            localStorage.setItem(KEEP_ALIVE_HEARTBEAT_KEY, Date.now());
-        }, 2000);
-    };
-
-    const stopKeepAliveHeartbeat = () => {
-        if (keepAliveHeartbeatInterval) {
-            clearInterval(keepAliveHeartbeatInterval);
-            keepAliveHeartbeatInterval = null;
-        }
-        localStorage.removeItem(KEEP_ALIVE_HEARTBEAT_KEY);
-        localStorage.removeItem(KEEP_ALIVE_LOCK_KEY);
-    };
-
-    // Write live server data to localStorage so the watchdog popup can display it.
-    const writeWatchdogData = () => {
-        try {
-            if (!currentServerID) return;
-            const players = serverMonitor
-                ? Array.from(serverMonitor.currentPlayers.values())
-                    .slice(0, 60)
-                    .map(p => ({ name: p.name || p.playerName || 'Unknown', id: p.id || p.playerId || '' }))
-                : [];
-            const payload = {
-                type: 'server',
-                serverName: currentServerName || 'Server ' + currentServerID,
-                serverID: currentServerID,
-                serverUrl: window.location.href,
-                population: currentPopulation,
-                players: players,
-                ts: Date.now()
-            };
-            localStorage.setItem(KEEP_ALIVE_DISPLAY_KEY, JSON.stringify(payload));
-        } catch (e) {}
-    };
-
-    const loadKeepAliveSetting = () => localStorage.getItem(KEEP_ALIVE_KEY) === 'true';
-    const saveKeepAliveSetting = (v) => localStorage.setItem(KEEP_ALIVE_KEY, v ? 'true' : 'false');
-
-    const startKeepAliveAudio = () => {
-        try {
-            if (keepAliveAudioCtx) return;
-            keepAliveAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const oscillator = keepAliveAudioCtx.createOscillator();
-            const gainNode = keepAliveAudioCtx.createGain();
-            gainNode.gain.setValueAtTime(0, keepAliveAudioCtx.currentTime);
-            oscillator.connect(gainNode);
-            gainNode.connect(keepAliveAudioCtx.destination);
-            oscillator.start();
-            // AudioContext may start suspended (browser autoplay policy) — resume on first interaction
-            if (keepAliveAudioCtx.state === 'suspended') {
-                const resume = () => { if (keepAliveAudioCtx) keepAliveAudioCtx.resume(); };
-                document.addEventListener('click', resume, { once: true });
-                document.addEventListener('keydown', resume, { once: true });
-            }
-        } catch (e) {
-            console.warn('[KeepAlive] Audio anti-throttle failed:', e);
-        }
-    };
-
-    const stopKeepAliveAudio = () => {
-        try {
-            if (keepAliveAudioCtx) { keepAliveAudioCtx.close(); keepAliveAudioCtx = null; }
-        } catch (e) {}
-    };
-
-    const startKeepAliveGuard = () => {
-        if (keepAliveBeforeUnload) return;
-        keepAliveBeforeUnload = (e) => {
-            if (suppressKeepAliveGuard) return;
-            e.preventDefault();
-            e.returnValue = 'BMS Keep-Alive is enabled. Are you sure you want to close this tab?';
-            return e.returnValue;
-        };
-        window.addEventListener('beforeunload', keepAliveBeforeUnload, { capture: true });
-    };
-
-    const stopKeepAliveGuard = () => {
-        if (keepAliveBeforeUnload) {
-            window.removeEventListener('beforeunload', keepAliveBeforeUnload, { capture: true });
-            keepAliveBeforeUnload = null;
-        }
-    };
-
-    const openKeepAliveWatchdog = () => {
-        if (keepAlivePopup && !keepAlivePopup.closed) return true;
-        const tabUrl = localStorage.getItem(KEEP_ALIVE_URL_KEY) || window.location.href;
-        const hbKey = KEEP_ALIVE_HEARTBEAT_KEY;
-        const lockKey = KEEP_ALIVE_LOCK_KEY;
-        const displayKey = KEEP_ALIVE_DISPLAY_KEY;
-        const popupHTML = `<!DOCTYPE html>
-<html><head>
-<title>BM Oversight Watchdog</title><style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#1a1f2e;color:#e9ecef;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:12px;display:flex;flex-direction:column;height:100vh;overflow:hidden}
-#header{background:#151b2a;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;gap:8px;flex-shrink:0}
-#header h4{color:#17a2b8;font-size:13px;margin:0;flex:1}
-.row{display:flex;align-items:center;gap:6px}
-.dot{width:8px;height:8px;border-radius:50%;background:#28a745;flex-shrink:0;transition:background .4s}
-#status{font-size:11px;color:#adb5bd}
-#data-panel{flex:1;overflow-y:auto;padding:10px 12px}
-#footer{padding:8px 12px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:6px;flex-shrink:0}
-.btn{flex:1;border:none;padding:5px 8px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600}
-.btn-stop{background:#dc3545;color:#fff}
-.btn-open{background:#17a2b8;color:#fff}
-.btn:hover{opacity:.85}
-#count{font-size:10px;color:#6c757d;text-align:center;padding:2px 0}
-.server-card{background:rgba(23,162,184,0.08);border:1px solid rgba(23,162,184,0.25);border-radius:6px;padding:8px 10px;margin-bottom:8px}
-.player-card{background:rgba(40,167,69,0.08);border:1px solid rgba(40,167,69,0.25);border-radius:6px;padding:8px 10px;margin-bottom:8px}
-.card-title{font-size:11px;font-weight:700;color:#adb5bd;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-.stat-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px}
-.stat-label{color:#6c757d;font-size:11px}
-.stat-val{color:#fff;font-size:12px;font-weight:600}
-.pop-num{font-size:22px;font-weight:700;color:#17a2b8;line-height:1}
-.player-list{margin-top:6px;max-height:160px;overflow-y:auto}
-.pl-item{padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pl-item:last-child{border-bottom:none}
-.server-line{padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.server-line:last-child{border-bottom:none}
-.no-data{color:#6c757d;font-style:italic;font-size:11px;padding:16px 0;text-align:center}
-::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:2px}
-</style></head><body>
-<div id="header">
-  <h4>&#x1F6E1; BM Oversight</h4>
-  <div class="row"><div class="dot" id="dot"></div><span id="status">Connecting...</span></div>
-</div>
-<div id="data-panel"><div class="no-data">Waiting for data...</div></div>
-<div id="count"></div>
-<div id="footer">
-  <button class="btn btn-open" onclick="openTab()">Open Tab</button>
-  <button class="btn btn-stop" onclick="stopWatchdog()">Stop</button>
-</div>
-<script>
-const TARGET_URL=${JSON.stringify(tabUrl)};
-const HB_KEY=${JSON.stringify(hbKey)};
-const LOCK_KEY=${JSON.stringify(lockKey)};
-const DISPLAY_KEY=${JSON.stringify(displayKey)};
-const STALE_MS=6000;
-const REOPEN_COOLDOWN=15000;
-let reopenCount=0,wasGone=false,stopped=false;
-const dot=document.getElementById("dot");
-const statusEl=document.getElementById("status");
-const panel=document.getElementById("data-panel");
-const countEl=document.getElementById("count");
-const toAgo=ts=>{ if(!ts) return ""; const s=Math.floor((Date.now()-ts)/1000); if(s<60) return s+"s ago"; if(s<3600) return Math.floor(s/60)+"m ago"; return Math.floor(s/3600)+"h ago"; };
-const openTab=()=>window.open(TARGET_URL,"_blank");
-const stopWatchdog=()=>{ stopped=true; localStorage.removeItem(LOCK_KEY); window.close(); };
-const renderServer=d=>{
-  let html=\`<div class="server-card"><div class="stat-row"><span class="stat-label">Server</span><span class="stat-val" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${d.serverName}">${d.serverName}</span></div><div class="stat-row"><span class="stat-label">Online now</span><div class="pop-num">${d.population}</div></div></div>\`;
-  if(d.players&&d.players.length>0){
-    html+=\`<div style="margin-bottom:4px;font-size:11px;color:#adb5bd;font-weight:600">ONLINE PLAYERS (${d.players.length}${d.players.length===60?"+ shown":""})</div><div class="player-list">\`;
-    d.players.forEach(p=>{ html+=\`<div class="pl-item">${p.name}</div>\`; });
-    html+="</div>";
-  } else { html+=\`<div class="no-data">No players online</div>\`; }
-  return html;
-};
-const renderPlayer=d=>{
-  let html=\`<div class="player-card"><div class="stat-row"><span class="stat-label">Player</span><span class="stat-val">${d.playerName||"Unknown"}</span></div>\`;
-  if(d.totalHours) html+=\`<div class="stat-row"><span class="stat-label">Rust Hours</span><span class="stat-val" style="color:#28a745">${d.totalHours}</span></div>\`;
-  if(d.firstSeen) html+=\`<div class="stat-row"><span class="stat-label">First Seen</span><span class="stat-val" style="font-size:10px">${d.firstSeen}</span></div>\`;
-  html+="</div>";
-  if(d.topServers&&d.topServers.length>0){
-    html+=\`<div style="margin-bottom:4px;font-size:11px;color:#adb5bd;font-weight:600">TOP SERVERS</div><div class="player-list">\`;
-    d.topServers.slice(0,15).forEach((s,i)=>{ html+=\`<div class="server-line">${i+1}. ${s.name} &mdash; ${typeof s.hours==="number"?s.hours.toFixed(1):s.hours}h</div>\`; });
-    html+="</div>";
-  }
-  return html;
-};
-const check=()=>{
-  if(stopped) return;
-  const hb=parseInt(localStorage.getItem(HB_KEY)||"0",10);
-  const now=Date.now();
-  const isGone=!hb||(now-hb>STALE_MS);
-  if(isGone){
-    dot.style.background="#ffc107";
-    const lockTs=parseInt(localStorage.getItem(LOCK_KEY)||"0",10);
-    if(now-lockTs>REOPEN_COOLDOWN){
-      localStorage.setItem(LOCK_KEY,String(now));
-      reopenCount++;
-      countEl.textContent="Reopened "+reopenCount+"×";
-      statusEl.textContent="Reopening tab…";
-      window.open(TARGET_URL,"_blank");
-    } else {
-      statusEl.textContent="Tab closed — reopening soon…";
-    }
-    wasGone=true;
-  } else {
-    dot.style.background="#28a745";
-    statusEl.textContent=wasGone?"Tab restored ✓":"Live — "+toAgo(hb);
-    if(wasGone){ wasGone=false; localStorage.removeItem(LOCK_KEY); countEl.textContent=""; }
-  }
-  try{
-    const raw=localStorage.getItem(DISPLAY_KEY);
-    if(raw){
-      const d=JSON.parse(raw);
-      panel.innerHTML=d.type==="player"?renderPlayer(d):renderServer(d);
-    }
-  }catch(e){}
-};
-setInterval(check,2000);
-check();
-<\/script></body></html>`;
-        const wx = Math.max(0, window.screen.width - 265);
-        keepAlivePopup = window.open('', 'bms_watchdog', `width=320,height=500,top=10,left=${wx},toolbar=no,menubar=no,scrollbars=no,resizable=yes`);
-        if (!keepAlivePopup || keepAlivePopup.closed) return false;
-        try {
-            keepAlivePopup.document.open();
-            keepAlivePopup.document.write(popupHTML);
-            keepAlivePopup.document.close();
-        } catch (e) { return false; }
-        return true;
-    };
-
-    const closeKeepAliveWatchdog = () => {
-        try { if (keepAlivePopup && !keepAlivePopup.closed) keepAlivePopup.close(); } catch (e) {}
-        keepAlivePopup = null;
-    };
-
-    const startKeepAlive = () => {
-        localStorage.setItem(KEEP_ALIVE_URL_KEY, window.location.href);
-        startKeepAliveAudio();
-        startKeepAliveGuard();
-        startKeepAliveHeartbeat();
-    };
-
-    const stopKeepAlive = () => {
-        stopKeepAliveAudio();
-        stopKeepAliveGuard();
-        stopKeepAliveHeartbeat();
-        closeKeepAliveWatchdog();
-        try { localStorage.removeItem(KEEP_ALIVE_DISPLAY_KEY); } catch (e) {}
     };
 
     // Population tracking variables
@@ -769,6 +535,7 @@ check();
             this.populationHistory = this.loadPopulationHistory();
             this.lastPlayerState = this.loadLastPlayerState();
             this.playerNotes = this.loadPlayerNotes();
+            this.playerTags = this.loadPlayerTags();
             this.isMonitoring = false;
             this.currentPlayers = new Map();
             this.soundEnabled = this.settings.soundEnabled !== false;
@@ -869,6 +636,7 @@ check();
             this.saveRecentAlerts();
             this.updateRecentAlertsDisplay();
             this.startAlertReminders();
+            updateTabTitleBadge();
         }
 
         acknowledgeAlert(alertId) {
@@ -876,6 +644,7 @@ check();
                 this.recentAlerts[alertId].acknowledged = true;
                 this.saveRecentAlerts();
                 this.updateRecentAlertsDisplay();
+                updateTabTitleBadge();
                 
                 // Check if all alerts are acknowledged
                 const unacknowledged = Object.values(this.recentAlerts).filter(alert => !alert.acknowledged);
@@ -911,6 +680,7 @@ check();
             this.saveRecentAlerts();
             this.stopAlertReminders();
             this.updateRecentAlertsDisplay();
+            updateTabTitleBadge();
             setTimeout(() => this.reorderSectionsIfNeeded(), 100);
         }
 
@@ -919,6 +689,7 @@ check();
             this.saveRecentAlerts();
             this.stopAlertReminders();
             this.updateRecentAlertsDisplay();
+            updateTabTitleBadge();
             setTimeout(() => this.reorderSectionsIfNeeded(), 100);
         }
 
@@ -1145,6 +916,43 @@ check();
             this.savePlayerNotes();
         }
 
+        loadPlayerTags() {
+            try {
+                return JSON.parse(localStorage.getItem(TAGS_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        savePlayerTags() {
+            localStorage.setItem(TAGS_KEY, JSON.stringify(this.playerTags));
+        }
+
+        getPlayerTags(playerId) {
+            return (this.playerTags && this.playerTags[playerId]) ? this.playerTags[playerId] : [];
+        }
+
+        addPlayerTag(playerId, tag) {
+            if (!tag || !tag.trim()) return;
+            const t = tag.trim();
+            const current = this.getPlayerTags(playerId);
+            if (!current.includes(t)) {
+                this.playerTags[playerId] = [...current, t];
+                this.savePlayerTags();
+            }
+        }
+
+        removePlayerTag(playerId, tag) {
+            const current = this.getPlayerTags(playerId);
+            const updated = current.filter(t => t !== tag);
+            if (updated.length === 0) {
+                delete this.playerTags[playerId];
+            } else {
+                this.playerTags[playerId] = updated;
+            }
+            this.savePlayerTags();
+        }
+
         // ── In-memory set of alt pairs already logged this session (avoids duplicates)
         // Format: "minId|maxId"
         _loggedAltPairs = new Set();
@@ -1184,6 +992,21 @@ check();
             };
             this.activityLog.push(entry);
             this.saveActivityLog();
+
+            // Store the alt pair on both player database records so searchDatabase can find them
+            try {
+                const _storeAlt = (ownId, ownName, peerId, peerName) => {
+                    const rec = this.playerDatabase[ownId];
+                    if (!rec) return;
+                    rec.knownAlts = rec.knownAlts || [];
+                    if (!rec.knownAlts.some(a => a.id === peerId)) {
+                        rec.knownAlts.push({ id: peerId, name: peerName, detectedAt: now });
+                    }
+                };
+                _storeAlt(targetId, targetName, candidateId, candidateName);
+                _storeAlt(candidateId, candidateName, targetId, targetName);
+                this.savePlayerDatabase();
+            } catch (_) {}
 
             clearTimeout(this.activityUpdateTimeout);
             this.activityUpdateTimeout = setTimeout(() => {
@@ -1449,6 +1272,7 @@ check();
                 const isOnline = this.currentPlayers.has(player.id);
                 const note = this.playerNotes && this.playerNotes[player.id];
                 const hasNote = note && note.text;
+                const tags = this.getPlayerTags(player.id);
                 
                 let nameDisplay = player.currentName;
                 // Support both legacy strings and new timestamped objects in previousNames
@@ -1469,6 +1293,7 @@ check();
                                 ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
                                 ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
                                 ${hasNote ? '<span style="color: #17a2b8; margin-left: 5px;">[NOTE]</span>' : ''}
+                                ${tags.length > 0 ? renderTagBadges(tags) : ''}
                             </div>
                             <div style="opacity: 0.7; font-size: 10px;">
                                 ID: ${player.id} | Last seen: ${lastSeenTime} | Detections: ${player.seenCount || 1}×
@@ -1496,6 +1321,11 @@ check();
                                     style="background: ${hasNote ? '#17a2b8' : '#495057'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                     title="${hasNote ? 'Edit Note' : 'Add Note'}">
                                 Notes
+                            </button>
+                            <button onclick="showPlayerTagsEditor('${player.id}')"
+                                    style="background: ${tags.length > 0 ? getTagColor(tags[0]) : '#495057'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="Manage tags">
+                                Tags${tags.length > 0 ? ' (' + tags.length + ')' : ''}
                             </button>
                             ${this.detectedAltPlayers.has(player.id) ? `<button onclick="showPlayerAlts('${player.id}')" style="background:#856404;color:white;border:none;padding:2px 5px;border-radius:3px;cursor:pointer;font-size:9px;" title="Possible alts detected">Alts</button>` : ''}
                             <button onclick="showNameHistory('${player.id}')"
@@ -1527,13 +1357,26 @@ check();
                     continue;
                 }
                 
-                // Only check previous names if we haven't found a match yet
+                // Check previous names
+                let matched = false;
                 if (player.previousNames && player.previousNames.length > 0) {
                     for (const entry of player.previousNames) {
                         const n = typeof entry === 'string' ? entry : (entry && entry.name) || '';
                         if (n.toLowerCase().includes(lowerQuery)) {
                             results.push(player);
-                            break; // Found match, no need to check other previous names
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Check known alt names/IDs so searching "altname" surfaces the main player too
+                if (!matched && player.knownAlts && player.knownAlts.length > 0) {
+                    for (const alt of player.knownAlts) {
+                        if ((alt.name && alt.name.toLowerCase().includes(lowerQuery)) ||
+                            (alt.id && alt.id.toLowerCase().includes(lowerQuery))) {
+                            results.push(player);
+                            break;
                         }
                     }
                 }
@@ -1592,7 +1435,7 @@ check();
             // Check if we should alert for this player
             const alert = this.alerts[playerId];
             if (alert && (alert.type === 'both' || alert.type === action.replace('ed', ''))) {
-                this.showAlert(playerName, action);
+                this.showAlert(playerName, action, playerId);
                 this.addRecentAlert(playerName, playerId, action);
                 if (this.soundEnabled) {
                     this.playAlertSound();
@@ -1657,7 +1500,7 @@ check();
             }, 300);
         }
 
-        showAlert(playerName, action) {
+        showAlert(playerName, action, playerId) {
             const alertDiv = document.createElement('div');
             alertDiv.style.cssText = `
                 position: fixed;
@@ -1696,6 +1539,11 @@ check();
             }
 
             document.body.appendChild(alertDiv);
+
+            // Browser notification (if enabled by user and permitted)
+            if (this.settings && this.settings.browserNotifications) {
+                sendBrowserNotification(playerName, action);
+            }
 
             setTimeout(() => {
                 alertDiv.style.animation = 'slideDown 0.3s ease-out reverse';
@@ -1869,7 +1717,6 @@ check();
             let syncCounter = 0;
             monitoringInterval = setInterval(() => {
                 this.checkPlayerChanges();
-                writeWatchdogData();
 
                 // Every 30 cycles (5 minutes), sync population to prevent drift
                 syncCounter++;
@@ -2839,6 +2686,7 @@ check();
                             <option value="left">Left Only</option>
                             <option value="name_changed">Name Changes</option>
                             <option value="new_players">New Players</option>
+                            <option value="alt_detected">Alts Detected</option>
                         </select>
                         <select id="activity-time-filter" onchange="applyActivityFilters()" 
                                 style="flex: 1; padding: 3px; border: none; border-radius: 3px; background: rgba(255,255,255,0.1); color: white; font-size: 11px;">
@@ -2948,26 +2796,22 @@ check();
                                 <option value="3600000" ${(loadAutoRefreshSettings().ms||120000)==3600000 ?'selected':''}>1 hour</option>
                             </select>
                         </div>
-                        <div style="border-top: 1px solid rgba(255,255,255,0.1); margin: 10px 0 8px; padding-top: 8px;">
-                            <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 4px;">
-                                <input type="checkbox" id="keep-alive-toggle" onchange="toggleKeepAlive(this.checked)" style="margin-right: 8px;">
-                                Keep tab alive (watchdog)
-                            </label>
-                            <div style="font-size: 10px; color: #6c757d; padding-left: 20px; margin-bottom: 6px;">
-                                Warns before closing &amp; opens a popup that auto-reopens this tab if closed.
-                            </div>
-                            <div id="keep-alive-controls" style="padding-left: 20px; display: none;">
-                                <button onclick="openKeepAliveWatchdogManual()"
-                                        style="background: #17a2b8; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;">
-                                    Open Watchdog Popup
-                                </button>
-                                <div id="keep-alive-notice" style="font-size: 10px; color: #ffc107; margin-top: 4px; display: none;"></div>
-                            </div>
-                        </div>
                         <button onclick="testSound()" 
                                 style="background: #28a745; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-top: 5px;">
                             Test Sound
                         </button>
+                        <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.08);">
+                            <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 6px;">
+                                <input type="checkbox" id="browser-notif-toggle" 
+                                       ${serverMonitor?.settings.browserNotifications ? 'checked' : ''}
+                                       onchange="toggleBrowserNotifications(this.checked)" style="margin-right: 8px;">
+                                Browser notifications (alerts when tab is in background)
+                            </label>
+                            <button onclick="requestNotificationPermission()" 
+                                    style="background: #6f42c1; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;">
+                                Request Permission
+                            </button>
+                        </div>
                     </div>
                     <div style="font-size: 11px; font-weight: bold; color: rgba(255,255,255,0.5); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px;">Export Data</div>
                     <div style="display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px;">
@@ -3101,16 +2945,6 @@ check();
                 // Initialize update checkboxes
                 const autoCheckCb = document.getElementById('auto-check-updates');
                 if (autoCheckCb) autoCheckCb.checked = loadAutoCheckSetting();
-                // Initialize keep-alive toggle
-                try {
-                    const keepAliveCb = document.getElementById('keep-alive-toggle');
-                    if (keepAliveCb) {
-                        const kaEnabled = loadKeepAliveSetting();
-                        keepAliveCb.checked = kaEnabled;
-                        const kaControls = document.getElementById('keep-alive-controls');
-                        if (kaControls) kaControls.style.display = kaEnabled ? 'block' : 'none';
-                    }
-                } catch (e) { console.warn('Could not initialize keep-alive toggle', e); }
                 // initialize sound select
                 try {
                     const soundSelect = document.getElementById('sound-select');
@@ -3404,7 +3238,9 @@ check();
                 if ((e.playerName && e.playerName.toLowerCase().includes(lower)) ||
                     (e.playerId && e.playerId.toLowerCase().includes(lower)) ||
                     (e.action && e.action.toLowerCase().includes(lower)) ||
-                    (e.oldName && String(e.oldName).toLowerCase().includes(lower))) {
+                    (e.oldName && String(e.oldName).toLowerCase().includes(lower)) ||
+                    (e.altPlayerName && e.altPlayerName.toLowerCase().includes(lower)) ||
+                    (e.altPlayerId && e.altPlayerId.toLowerCase().includes(lower))) {
                     results.push(e);
                 }
             } catch (err) { /* ignore */ }
@@ -3593,6 +3429,73 @@ check();
         }
     };
 
+    // ── Tab title badge ──────────────────────────────────────────────────────
+    let _originalPageTitle = document.title;
+    const updateTabTitleBadge = () => {
+        if (!serverMonitor) return;
+        const count = Object.values(serverMonitor.recentAlerts).filter(a => !a.acknowledged).length;
+        if (count > 0) {
+            document.title = `[${count}] ${_originalPageTitle.replace(/^\[\d+\] /, '')}`;
+        } else {
+            document.title = _originalPageTitle.replace(/^\[\d+\] /, '');
+        }
+    };
+
+    // ── Browser Notification API ─────────────────────────────────────────────
+    const sendBrowserNotification = (playerName, action) => {
+        if (!('Notification' in window) || Notification.permission !== 'granted') return;
+        const actionText = action === 'joined' ? 'joined the server' : action === 'left' ? 'left the server' : action === 'name_changed' ? 'changed their name' : action;
+        try {
+            new Notification(`BMS Alert: ${playerName}`, {
+                body: `${playerName} ${actionText}`,
+                icon: 'https://www.battlemetrics.com/favicon.ico',
+                tag: `bms_${playerName}_${action}`,
+                silent: false,
+            });
+        } catch (e) { /* Notification blocked or unavailable */ }
+    };
+
+    window.requestNotificationPermission = () => {
+        if (!('Notification' in window)) {
+            alert('Browser notifications are not supported in this browser.');
+            return;
+        }
+        Notification.requestPermission().then(permission => {
+            if (permission === 'granted') {
+                alert('Browser notifications enabled!');
+            } else {
+                alert('Permission denied. You can change this in browser settings.');
+                // Uncheck the toggle if permission was denied
+                const toggle = document.getElementById('browser-notif-toggle');
+                if (toggle) toggle.checked = false;
+                if (serverMonitor) {
+                    serverMonitor.settings.browserNotifications = false;
+                    serverMonitor.saveSettings();
+                }
+            }
+        });
+    };
+
+    window.toggleBrowserNotifications = (enabled) => {
+        if (!serverMonitor) return;
+        if (enabled && Notification.permission !== 'granted') {
+            Notification.requestPermission().then(permission => {
+                if (permission === 'granted') {
+                    serverMonitor.settings.browserNotifications = true;
+                    serverMonitor.saveSettings();
+                } else {
+                    serverMonitor.settings.browserNotifications = false;
+                    serverMonitor.saveSettings();
+                    const toggle = document.getElementById('browser-notif-toggle');
+                    if (toggle) toggle.checked = false;
+                }
+            });
+        } else {
+            serverMonitor.settings.browserNotifications = enabled;
+            serverMonitor.saveSettings();
+        }
+    };
+
     window.toggleSoundAlerts = (enabled) => {
         if (serverMonitor) {
             serverMonitor.soundEnabled = enabled;
@@ -3678,41 +3581,6 @@ check();
             startAutoRefresh(ms); // restart with new interval
         }
     };
-
-    window.toggleKeepAlive = (enabled) => {
-        saveKeepAliveSetting(enabled);
-        const controls = document.getElementById('keep-alive-controls');
-        if (controls) controls.style.display = enabled ? 'block' : 'none';
-        if (enabled) {
-            startKeepAlive();
-            const opened = openKeepAliveWatchdog();
-            const notice = document.getElementById('keep-alive-notice');
-            if (notice) {
-                if (!opened) {
-                    notice.style.display = 'block';
-                    notice.textContent = '\u26a0 Popup blocked \u2014 click "Open Watchdog Popup" to retry.';
-                } else {
-                    notice.style.display = 'none';
-                }
-            }
-        } else {
-            stopKeepAlive();
-        }
-    };
-
-    window.openKeepAliveWatchdogManual = () => {
-        const opened = openKeepAliveWatchdog();
-        const notice = document.getElementById('keep-alive-notice');
-        if (notice) {
-            if (!opened) {
-                notice.style.display = 'block';
-                notice.textContent = '\u26a0 Popup still blocked \u2014 allow popups for battlemetrics.com in browser settings.';
-            } else {
-                notice.style.display = 'none';
-            }
-        }
-    };
-
     window.toggleMonitoring = () => {
         const btn = document.getElementById('monitoring-btn');
         if (!serverMonitor || !btn) return;
@@ -3830,7 +3698,6 @@ check();
             
             // Reload page to ensure clean state
             setTimeout(() => {
-                suppressKeepAliveGuard = true;
                 location.reload();
             }, 1000);
         }
@@ -4338,7 +4205,7 @@ check();
         box.appendChild(subInfo);
 
         // ── Tabs ─────────────────────────────────────────────────────
-        const TABS = ['Session History', 'Name History', 'Notes', 'Possible Alts'];
+        const TABS = ['Session History', 'Name History', 'Notes', 'Tags', 'Possible Alts'];
         let activeTab = 'Session History';
 
         const tabBar = document.createElement('div');
@@ -4529,6 +4396,89 @@ check();
                 btnRow.appendChild(saveNoteBtn);
                 wrapper.appendChild(btnRow);
                 tabContent.appendChild(wrapper);
+
+            } else if (tab === 'Tags') {
+                const currentTags = serverMonitor.getPlayerTags(playerId);
+
+                const wrapper = document.createElement('div');
+
+                // Current tags display
+                const tagsDisplay = document.createElement('div');
+                tagsDisplay.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;min-height:24px;';
+                const refreshTagsDisplay = () => {
+                    tagsDisplay.innerHTML = '';
+                    const cur = serverMonitor.getPlayerTags(playerId);
+                    if (cur.length === 0) {
+                        tagsDisplay.innerHTML = '<span style="opacity:0.5;font-size:11px;">No tags yet</span>';
+                    } else {
+                        cur.forEach(tag => {
+                            const pill = document.createElement('span');
+                            pill.style.cssText = `display:inline-flex;align-items:center;gap:3px;background:${getTagColor(tag)};color:white;font-size:10px;font-weight:600;padding:2px 7px;border-radius:12px;cursor:default;`;
+                            pill.innerHTML = `${tag.replace(/</g,'&lt;')} <span title="Remove" style="cursor:pointer;font-size:12px;line-height:1;opacity:0.8;" data-tag="${tag.replace(/"/g,'&quot;')}">✕</span>`;
+                            pill.querySelector('span').onclick = (e) => {
+                                const t = e.currentTarget.dataset.tag;
+                                serverMonitor.removePlayerTag(playerId, t);
+                                serverMonitor.updateDatabaseDisplay();
+                                refreshTagsDisplay();
+                            };
+                            tagsDisplay.appendChild(pill);
+                        });
+                    }
+                };
+                refreshTagsDisplay();
+                wrapper.appendChild(tagsDisplay);
+
+                // Preset buttons
+                const presetsLabel = document.createElement('div');
+                presetsLabel.style.cssText = 'font-size:10px;color:#adb5bd;margin-bottom:5px;';
+                presetsLabel.textContent = 'Quick add:';
+                wrapper.appendChild(presetsLabel);
+
+                const presetsRow = document.createElement('div');
+                presetsRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px;';
+                TAG_PRESETS.forEach(preset => {
+                    const btn = document.createElement('button');
+                    btn.textContent = preset;
+                    btn.style.cssText = `background:${getTagColor(preset)};color:white;border:none;padding:3px 8px;border-radius:10px;cursor:pointer;font-size:10px;`;
+                    btn.onclick = () => {
+                        serverMonitor.addPlayerTag(playerId, preset);
+                        serverMonitor.updateDatabaseDisplay();
+                        refreshTagsDisplay();
+                    };
+                    presetsRow.appendChild(btn);
+                });
+                wrapper.appendChild(presetsRow);
+
+                // Custom tag input
+                const customLabel = document.createElement('div');
+                customLabel.style.cssText = 'font-size:10px;color:#adb5bd;margin-bottom:4px;';
+                customLabel.textContent = 'Custom tag:';
+                wrapper.appendChild(customLabel);
+
+                const inputRow = document.createElement('div');
+                inputRow.style.cssText = 'display:flex;gap:6px;';
+                const customInput = document.createElement('input');
+                customInput.type = 'text';
+                customInput.placeholder = 'Enter custom tag…';
+                customInput.maxLength = 20;
+                customInput.style.cssText = 'flex:1;padding:4px 8px;border-radius:4px;background:rgba(255,255,255,0.07);color:white;border:1px solid rgba(255,255,255,0.15);font-size:11px;';
+                const addCustomBtn = document.createElement('button');
+                addCustomBtn.textContent = 'Add';
+                addCustomBtn.style.cssText = 'background:#17a2b8;color:white;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;';
+                addCustomBtn.onclick = () => {
+                    const val = customInput.value.trim();
+                    if (!val) return;
+                    serverMonitor.addPlayerTag(playerId, val);
+                    serverMonitor.updateDatabaseDisplay();
+                    customInput.value = '';
+                    refreshTagsDisplay();
+                };
+                customInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addCustomBtn.click(); });
+                inputRow.appendChild(customInput);
+                inputRow.appendChild(addCustomBtn);
+                wrapper.appendChild(inputRow);
+
+                tabContent.appendChild(wrapper);
             }
         };
 
@@ -4569,6 +4519,15 @@ check();
         setTimeout(() => {
             const tabBar = document.querySelector('#bms-name-history-modal [data-tab="Notes"]');
             if (tabBar) tabBar.click();
+        }, 50);
+    };
+
+    window.showPlayerTagsEditor = (playerId) => {
+        window.showNameHistory(playerId);
+        // After modal renders, switch to Tags tab
+        setTimeout(() => {
+            const tabBtn = document.querySelector('#bms-name-history-modal [data-tab="Tags"]');
+            if (tabBtn) tabBtn.click();
         }, 50);
     };
 
@@ -4835,6 +4794,7 @@ check();
         const dbPlayer = serverMonitor && serverMonitor.playerDatabase && serverMonitor.playerDatabase[entry.playerId];
         const fdMap    = getFirstDetectionMap();
         const isNewPlayer = checkIsNewPlayer(entry);
+        const entryTags = serverMonitor ? serverMonitor.getPlayerTags(entry.playerId) : [];
 
         // Escape single/double quotes so player names with apostrophes don't break onclick attributes
         const safeName = String(entry.playerName || '').replace(/'/g, '&#39;').replace(/"/g, '&#34;');
@@ -4879,11 +4839,12 @@ check();
         return `
             <div style="display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 12px;">
                 <div style="flex: 1; min-width: 0; margin-right: 6px;">
-                    <div style="color: ${actionColor}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-                        ${mainLine}
-                        ${isNewPlayer ? '<span style="color: #17a2b8; margin-left: 5px; font-size: 10px;">[NEW]</span>' : ''}
-                        ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px; font-size: 10px;">[ALERT]</span>' : ''}
-                        ${isSaved  ? '<span style="color: #28a745;  margin-left: 5px; font-size: 10px;">[SAVED]</span>'  : ''}
+                    <div style="display: flex; align-items: center; gap: 4px; overflow: hidden;">
+                        <span style="color: ${actionColor}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;">${mainLine}</span>
+                        ${isNewPlayer ? '<span style="color: #17a2b8; font-size: 10px; font-weight: 600; flex-shrink: 0;">[NEW]</span>' : ''}
+                        ${hasAlert ? '<span style="color: #ffc107; font-size: 10px; font-weight: 600; flex-shrink: 0;">[ALERT]</span>' : ''}
+                        ${isSaved  ? '<span style="color: #28a745;  font-size: 10px; font-weight: 600; flex-shrink: 0;">[SAVED]</span>'  : ''}
+                        ${entryTags.length > 0 ? renderTagBadges(entryTags) : ''}
                     </div>
                     <div style="opacity: 0.55; font-size: 10px; margin-top: 2px; word-break: break-word;">${metaLine}</div>
                 </div>
@@ -5366,22 +5327,13 @@ check();
         localStorage.removeItem(MENU_VISIBLE_KEY);
         localStorage.removeItem(AUTO_REFRESH_ENABLED_KEY);
         localStorage.removeItem(AUTO_REFRESH_MS_KEY);
-        localStorage.removeItem(KEEP_ALIVE_KEY);
-        localStorage.removeItem(KEEP_ALIVE_URL_KEY);
         stopAutoRefresh();
-        stopKeepAlive();
 
         // Update auto-refresh UI
         const arToggle = document.getElementById('auto-refresh-toggle');
         if (arToggle) arToggle.checked = false;
         const arSelect = document.getElementById('auto-refresh-interval');
         if (arSelect) arSelect.value = '120000';
-        // Update keep-alive UI
-        const kaToggle = document.getElementById('keep-alive-toggle');
-        if (kaToggle) kaToggle.checked = false;
-        const kaControls = document.getElementById('keep-alive-controls');
-        if (kaControls) kaControls.style.display = 'none';
-
         // Server-specific settings if serverMonitor exists
         if (typeof ALERT_SETTINGS_KEY !== 'undefined' && ALERT_SETTINGS_KEY) {
             localStorage.removeItem(ALERT_SETTINGS_KEY);
@@ -6104,14 +6056,6 @@ check();
         const _arSettings = loadAutoRefreshSettings();
         if (_arSettings.enabled) {
             startAutoRefresh(_arSettings.ms);
-        }
-
-        // Re-apply keep-alive protection if previously enabled.
-        // Audio anti-throttle + beforeunload guard start immediately.
-        // The watchdog popup cannot auto-reopen without a user gesture —
-        // user must click "Open Watchdog Popup" in Settings after a reload.
-        if (loadKeepAliveSetting()) {
-            startKeepAlive();
         }
 
         // Update server ID and name display
@@ -7004,21 +6948,6 @@ User Agent: ${navigator.userAgent}
         allTopServers = topServers;
         currentServerPage = 0;
 
-        // Write player data for watchdog popup display
-        try {
-            const _wd = {
-                type: 'player',
-                playerName: playerName,
-                playerID: playerID,
-                playerUrl: window.location.href,
-                totalHours: totalHours,
-                firstSeen: firstSeenData ? firstSeenData.relative : null,
-                topServers: (topServers || []).slice(0, 15).map(s => ({ name: s.name, hours: s.hours })),
-                ts: Date.now()
-            };
-            localStorage.setItem('bms_watchdog_display', JSON.stringify(_wd));
-        } catch (_e) {}
-
         // Create collapsible sections
         let content = `
             <div style="border-bottom: 2px solid rgba(255,255,255,0.2); padding-bottom: 12px; margin-bottom: 15px;">
@@ -7226,10 +7155,6 @@ User Agent: ${navigator.userAgent}
                         <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
                             <button id="check-updates-now-btn" style="background: #17a2b8; color: white; border: none; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">Check for updates now</button>
                             <button id="reset-settings-btn" style="background: #dc3545; color: white; border: none; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">Reset to defaults</button>
-                        </div>
-                        <div style="margin-top:8px;">
-                            <a id="bma-github-link" href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" rel="noopener" style="color:#1a0dab; text-decoration:underline; display:inline-block; margin-right:12px;">GitHub</a>
-                            <a id="bma-discord-link" href="https://discord.gg/bEPn9UH9Xw" target="_blank" rel="noopener" style="color:#1a0dab; text-decoration:underline; display:inline-block;">Discord</a>
                         </div>
                         </div>
                     </div>
