@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BattleMetrics Server Monitor & Alert System
 // @namespace    http://tampermonkey.net/
-// @version      1.0.6
+// @version      1.0.9
 // @description  Real-time server monitoring with player alerts, activity logging, and player search for BattleMetrics Rust servers
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/servers/*
@@ -30,6 +30,7 @@
     let POPULATION_HISTORY_KEY = '';
     let LAST_PLAYER_STATE_KEY = '';
     let SESSIONS_KEY = '';
+    let NOTES_KEY = '';
 
     // Function to initialize server-specific keys
     const initializeStorageKeys = (serverID) => {
@@ -42,10 +43,11 @@
         POPULATION_HISTORY_KEY = `bms_population_history_${serverID}`;
         LAST_PLAYER_STATE_KEY = `bms_last_player_state_${serverID}`;
         SESSIONS_KEY = `bms_script_sessions_${serverID}`;
+        NOTES_KEY = `bms_player_notes_${serverID}`;
     };
 
     // Update/check settings (global)
-    const SCRIPT_VERSION = '1.0.6';
+    const SCRIPT_VERSION = '1.0.9';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMserver.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
     const AUTO_CHECK_KEY = 'bms_auto_check_updates';
@@ -375,7 +377,167 @@ User Agent: ${navigator.userAgent}
     let alertReminderInterval = null;
     let populationStatsInterval = null;
     let timestampRefreshInterval = null;
-    
+    let autoRefreshIntervalId = null;
+
+    // Auto-refresh settings keys (global, not server-specific)
+    const AUTO_REFRESH_ENABLED_KEY = 'bms_auto_refresh_enabled';
+    const AUTO_REFRESH_MS_KEY = 'bms_auto_refresh_ms';
+    const KEEP_ALIVE_KEY = 'bms_keep_alive_enabled';
+    const KEEP_ALIVE_URL_KEY = 'bms_keep_alive_url';
+
+    const loadAutoRefreshSettings = () => ({
+        enabled: localStorage.getItem(AUTO_REFRESH_ENABLED_KEY) === 'true',
+        ms: parseInt(localStorage.getItem(AUTO_REFRESH_MS_KEY), 10) || 120000
+    });
+
+    const saveAutoRefreshSettings = (enabled, ms) => {
+        localStorage.setItem(AUTO_REFRESH_ENABLED_KEY, enabled ? 'true' : 'false');
+        localStorage.setItem(AUTO_REFRESH_MS_KEY, String(ms));
+    };
+
+    const startAutoRefresh = (ms) => {
+        stopAutoRefresh();
+        autoRefreshIntervalId = setInterval(() => {
+            suppressKeepAliveGuard = true;
+            location.reload();
+        }, ms);
+    };
+
+    const stopAutoRefresh = () => {
+        if (autoRefreshIntervalId) {
+            clearInterval(autoRefreshIntervalId);
+            autoRefreshIntervalId = null;
+        }
+    };
+
+    // ── Keep-Alive System ──────────────────────────────────────────────────────
+    // Prevents background tab throttling, warns before close, and opens a
+    // watchdog popup that auto-reopens this tab if it is accidentally closed.
+    let keepAliveAudioCtx = null;
+    let keepAliveBeforeUnload = null;
+    let keepAlivePopup = null;
+    let suppressKeepAliveGuard = false; // set true before intentional reloads
+
+    const loadKeepAliveSetting = () => localStorage.getItem(KEEP_ALIVE_KEY) === 'true';
+    const saveKeepAliveSetting = (v) => localStorage.setItem(KEEP_ALIVE_KEY, v ? 'true' : 'false');
+
+    const startKeepAliveAudio = () => {
+        try {
+            if (keepAliveAudioCtx) return;
+            keepAliveAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = keepAliveAudioCtx.createOscillator();
+            const gainNode = keepAliveAudioCtx.createGain();
+            gainNode.gain.setValueAtTime(0, keepAliveAudioCtx.currentTime);
+            oscillator.connect(gainNode);
+            gainNode.connect(keepAliveAudioCtx.destination);
+            oscillator.start();
+            // AudioContext may start suspended (browser autoplay policy) — resume on first interaction
+            if (keepAliveAudioCtx.state === 'suspended') {
+                const resume = () => { if (keepAliveAudioCtx) keepAliveAudioCtx.resume(); };
+                document.addEventListener('click', resume, { once: true });
+                document.addEventListener('keydown', resume, { once: true });
+            }
+        } catch (e) {
+            console.warn('[KeepAlive] Audio anti-throttle failed:', e);
+        }
+    };
+
+    const stopKeepAliveAudio = () => {
+        try {
+            if (keepAliveAudioCtx) { keepAliveAudioCtx.close(); keepAliveAudioCtx = null; }
+        } catch (e) {}
+    };
+
+    const startKeepAliveGuard = () => {
+        if (keepAliveBeforeUnload) return;
+        keepAliveBeforeUnload = (e) => {
+            if (suppressKeepAliveGuard) return;
+            e.preventDefault();
+            e.returnValue = 'BMS Keep-Alive is enabled. Are you sure you want to close this tab?';
+            return e.returnValue;
+        };
+        window.addEventListener('beforeunload', keepAliveBeforeUnload, { capture: true });
+    };
+
+    const stopKeepAliveGuard = () => {
+        if (keepAliveBeforeUnload) {
+            window.removeEventListener('beforeunload', keepAliveBeforeUnload, { capture: true });
+            keepAliveBeforeUnload = null;
+        }
+    };
+
+    const openKeepAliveWatchdog = () => {
+        if (keepAlivePopup && !keepAlivePopup.closed) return true;
+        const tabUrl = localStorage.getItem(KEEP_ALIVE_URL_KEY) || window.location.href;
+        const popupHTML = `<!DOCTYPE html>
+<html><head>
+<title>BMS Watchdog</title><style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#1e2736;color:#e9ecef;font-family:-apple-system,sans-serif;padding:14px;font-size:12px}
+h4{color:#17a2b8;margin-bottom:10px;font-size:13px}
+.row{display:flex;align-items:center;gap:7px;margin-bottom:8px;font-weight:600}
+.dot{width:9px;height:9px;border-radius:50%;background:#28a745;flex-shrink:0;transition:background .4s}
+.url{color:#6c757d;font-size:10px;margin-bottom:10px;word-break:break-all}
+.btn{background:#dc3545;color:#fff;border:none;padding:5px 10px;border-radius:3px;cursor:pointer;font-size:11px;width:100%}
+.btn:hover{opacity:.85}
+.count{font-size:10px;color:#6c757d;margin-top:7px}
+</style></head><body>
+<h4>&#x1F6E1; BMS Watchdog</h4>
+<div class="row"><div class="dot" id="dot"></div><span id="status">Monitoring tab</span></div>
+<div class="url" id="url"></div>
+<button class="btn" onclick="window.close()">Stop &amp; Close</button>
+<div class="count" id="count"></div>
+<script>
+const fallback=${JSON.stringify(tabUrl)};
+let reopenCount=0,lastReopen=0;
+const dot=document.getElementById('dot');
+const statusEl=document.getElementById('status');
+const urlEl=document.getElementById('url');
+const countEl=document.getElementById('count');
+const getUrl=()=>{ try{ if(window.opener&&!window.opener.closed) return window.opener.location.href; }catch(e){} return fallback; };
+const check=()=>{
+  try{
+    if(!window.opener||window.opener.closed){
+      dot.style.background='#ffc107';
+      statusEl.textContent='Tab closed — reopening\u2026';
+      const targetUrl=getUrl();
+      const now=Date.now();
+      if(now-lastReopen>9000){ lastReopen=now; reopenCount++; countEl.textContent='Reopened '+reopenCount+'\xd7'; window.open(targetUrl,'_blank'); }
+    } else {
+      urlEl.textContent=getUrl(); dot.style.background='#28a745'; statusEl.textContent='Monitoring tab';
+    }
+  } catch(e){ statusEl.textContent='Watching (guard active)'; }
+};
+setInterval(check,2000);
+<\/script></body></html>`;
+        const wx = Math.max(0, window.screen.width - 265);
+        keepAlivePopup = window.open('', 'bms_watchdog', `width=250,height=175,top=10,left=${wx},toolbar=no,menubar=no,scrollbars=no,resizable=yes`);
+        if (!keepAlivePopup || keepAlivePopup.closed) return false;
+        try {
+            keepAlivePopup.document.open();
+            keepAlivePopup.document.write(popupHTML);
+            keepAlivePopup.document.close();
+        } catch (e) { return false; }
+        return true;
+    };
+
+    const closeKeepAliveWatchdog = () => {
+        try { if (keepAlivePopup && !keepAlivePopup.closed) keepAlivePopup.close(); } catch (e) {}
+        keepAlivePopup = null;
+    };
+
+    const startKeepAlive = () => {
+        localStorage.setItem(KEEP_ALIVE_URL_KEY, window.location.href);
+        startKeepAliveAudio();
+        startKeepAliveGuard();
+    };
+
+    const stopKeepAlive = () => {
+        stopKeepAliveAudio();
+        stopKeepAliveGuard();
+        closeKeepAliveWatchdog();
+    };
+
     // Population tracking variables
     let populationHistory = [];
     let currentPopulation = 0;
@@ -468,6 +630,7 @@ User Agent: ${navigator.userAgent}
             this.playerDatabase = this.loadPlayerDatabase();
             this.populationHistory = this.loadPopulationHistory();
             this.lastPlayerState = this.loadLastPlayerState();
+            this.playerNotes = this.loadPlayerNotes();
             this.isMonitoring = false;
             this.currentPlayers = new Map();
             this.soundEnabled = this.settings.soundEnabled !== false;
@@ -867,6 +1030,73 @@ User Agent: ${navigator.userAgent}
             }
         }
 
+        loadPlayerNotes() {
+            try {
+                return JSON.parse(localStorage.getItem(NOTES_KEY) || '{}');
+            } catch {
+                return {};
+            }
+        }
+
+        savePlayerNotes() {
+            localStorage.setItem(NOTES_KEY, JSON.stringify(this.playerNotes));
+        }
+
+        setPlayerNote(playerId, text) {
+            if (!text || !text.trim()) {
+                delete this.playerNotes[playerId];
+            } else {
+                this.playerNotes[playerId] = { text: text.trim(), updatedAt: Date.now() };
+            }
+            this.savePlayerNotes();
+        }
+
+        // ── In-memory set of alt pairs already logged this session (avoids duplicates)
+        // Format: "minId|maxId"
+        _loggedAltPairs = new Set();
+
+        // Set of every playerId that appears in at least one detected alt pair.
+        // Used to conditionally show the Alts button in the UI without re-running detectAlts.
+        detectedAltPlayers = new Set();
+
+        logAltDetection(targetId, targetName, candidateId, candidateName, matchCount, coverage) {
+            // Suppress duplicate pair logs within the same page session
+            const key = [targetId, candidateId].sort().join('|');
+            if (this._loggedAltPairs.has(key)) return;
+            this._loggedAltPairs.add(key);
+
+            // Mark both sides so the UI can show the button without re-running the scan
+            this.detectedAltPlayers.add(targetId);
+            this.detectedAltPlayers.add(candidateId);
+
+            const now = Date.now();
+            const d = new Date(now);
+            const entry = {
+                timestamp: now,
+                utcISO: d.toISOString(),
+                dayOfWeek: d.getDay(),
+                hourUTC: d.getUTCHours(),
+                hourLocal: d.getHours(),
+                playerName: targetName,
+                playerId: targetId,
+                altPlayerId: candidateId,
+                altPlayerName: candidateName,
+                altMatches: matchCount,
+                altCoverage: coverage,
+                action: 'alt_detected',
+                serverName: currentServerName,
+                serverID: currentServerID,
+                time: d.toLocaleString()
+            };
+            this.activityLog.push(entry);
+            this.saveActivityLog();
+
+            clearTimeout(this.activityUpdateTimeout);
+            this.activityUpdateTimeout = setTimeout(() => {
+                this.updateActivityDisplay();
+            }, 500);
+        }
+
         calculatePopulationStats() {
             const now = Date.now();
             const twoHoursAgo = now - (2 * 60 * 60 * 1000);
@@ -1143,6 +1373,8 @@ User Agent: ${navigator.userAgent}
                 const hasAlert = this.alerts[player.id];
                 const isSaved = this.savedPlayers[player.id];
                 const isOnline = this.currentPlayers.has(player.id);
+                const note = this.playerNotes && this.playerNotes[player.id];
+                const hasNote = note && note.text;
                 
                 let nameDisplay = player.currentName;
                 // Support both legacy strings and new timestamped objects in previousNames
@@ -1162,11 +1394,13 @@ User Agent: ${navigator.userAgent}
                                 ${nameDisplay} ${onlineStatus}
                                 ${hasAlert ? '<span style="color: #ffc107; margin-left: 5px;">[ALERT]</span>' : ''}
                                 ${isSaved ? '<span style="color: #28a745; margin-left: 5px;">[SAVED]</span>' : ''}
+                                ${hasNote ? '<span style="color: #17a2b8; margin-left: 5px;">[NOTE]</span>' : ''}
                             </div>
                             <div style="opacity: 0.7; font-size: 10px;">
                                 ID: ${player.id} | Last seen: ${lastSeenTime} | Detections: ${player.seenCount || 1}×
                             </div>
                             ${player.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
+                            ${hasNote ? `<div style="color: #17a2b8; font-size: 10px; margin-top: 2px; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px;">📝 ${note.text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>` : ''}
                         </div>
                         <div style="display: flex; gap: 3px; flex-wrap: wrap;">
                             <button onclick="window.open('https://www.battlemetrics.com/players/${player.id}', '_blank')" 
@@ -1184,9 +1418,15 @@ User Agent: ${navigator.userAgent}
                                     title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
                                 ${isSaved ? 'Saved' : 'Save'}
                             </button>
+                            <button onclick="showPlayerNote('${player.id}')"
+                                    style="background: ${hasNote ? '#17a2b8' : '#495057'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                    title="${hasNote ? 'Edit Note' : 'Add Note'}">
+                                Notes
+                            </button>
+                            ${this.detectedAltPlayers.has(player.id) ? `<button onclick="showPlayerAlts('${player.id}')" style="background:#856404;color:white;border:none;padding:2px 5px;border-radius:3px;cursor:pointer;font-size:9px;" title="Possible alts detected">Alts</button>` : ''}
                             <button onclick="showNameHistory('${player.id}')"
                                     style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                    title="View name history">
+                                    title="View session history &amp; names">
                                 History
                             </button>
                         </div>
@@ -1300,6 +1540,22 @@ User Agent: ${navigator.userAgent}
                 if (this.soundEnabled) {
                     this.playAlertSound();
                 }
+            }
+
+            // After every join/leave, run a quick alts scan for this player so
+            // any newly-detectable handoff pairs get logged to the activity feed.
+            // – On 'joined': catches the real-time B→A handoff (B left, A just joined).
+            // – On 'left':   catches any A→B pattern that has built up over prior sessions.
+            if (action === 'joined' || action === 'left') {
+                setTimeout(() => {
+                    try {
+                        const alts = detectAlts(playerId);
+                        for (const alt of alts) {
+                            const altName = alt.player.currentName || `Player ${alt.playerId}`;
+                            this.logAltDetection(playerId, playerName, alt.playerId, altName, alt.matches, alt.coverage);
+                        }
+                    } catch (_) { /* detectAlts not yet defined on very first event */ }
+                }, 0);
             }
 
             // Debounce activity display updates to reduce lag
@@ -1449,6 +1705,61 @@ User Agent: ${navigator.userAgent}
                     mod.start(now);
                     oscillator.stop(now + 1.4);
                     mod.stop(now + 1.4);
+                } else if (choice === 'triple_ping') {
+                    // Three ascending quick pings
+                    const freqs = [660, 880, 1100];
+                    const offsets = [0, 0.18, 0.36];
+                    // Use the pre-created oscillator/gain for the first ping
+                    oscillator.type = 'sine';
+                    oscillator.frequency.setValueAtTime(freqs[0], now + offsets[0]);
+                    gainNode.gain.linearRampToValueAtTime(0.3, now + offsets[0] + 0.01);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, now + offsets[0] + 0.14);
+                    oscillator.start(now + offsets[0]);
+                    oscillator.stop(now + offsets[0] + 0.14);
+                    for (let i = 1; i < 3; i++) {
+                        const pOsc = audioContext.createOscillator();
+                        const pGain = audioContext.createGain();
+                        pOsc.type = 'sine';
+                        pOsc.frequency.setValueAtTime(freqs[i], now + offsets[i]);
+                        pGain.gain.setValueAtTime(0.0, now + offsets[i]);
+                        pGain.gain.linearRampToValueAtTime(0.3, now + offsets[i] + 0.01);
+                        pGain.gain.exponentialRampToValueAtTime(0.001, now + offsets[i] + 0.14);
+                        pOsc.connect(pGain);
+                        pGain.connect(audioContext.destination);
+                        pOsc.start(now + offsets[i]);
+                        pOsc.stop(now + offsets[i] + 0.14);
+                    }
+                } else if (choice === 'deep_thud') {
+                    // Low bass punch
+                    oscillator.type = 'sine';
+                    oscillator.frequency.setValueAtTime(120, now);
+                    oscillator.frequency.exponentialRampToValueAtTime(40, now + 0.25);
+                    gainNode.gain.linearRampToValueAtTime(0.5, now + 0.005);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+                    oscillator.start(now);
+                    oscillator.stop(now + 0.25);
+                    // Add a mid-layer click for presence
+                    const clickOsc = audioContext.createOscillator();
+                    const clickGain = audioContext.createGain();
+                    clickOsc.type = 'triangle';
+                    clickOsc.frequency.setValueAtTime(300, now);
+                    clickGain.gain.setValueAtTime(0.0, now);
+                    clickGain.gain.linearRampToValueAtTime(0.2, now + 0.003);
+                    clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+                    clickOsc.connect(clickGain);
+                    clickGain.connect(audioContext.destination);
+                    clickOsc.start(now);
+                    clickOsc.stop(now + 0.08);
+                } else if (choice === 'rising_sweep') {
+                    // Frequency sweep from low to high
+                    oscillator.type = 'sine';
+                    oscillator.frequency.setValueAtTime(200, now);
+                    oscillator.frequency.exponentialRampToValueAtTime(1400, now + 0.55);
+                    gainNode.gain.linearRampToValueAtTime(0.28, now + 0.02);
+                    gainNode.gain.setValueAtTime(0.28, now + 0.45);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+                    oscillator.start(now);
+                    oscillator.stop(now + 0.6);
                 } else {
                     // Fallback to a short sine
                     oscillator.type = 'sine';
@@ -1955,10 +2266,15 @@ User Agent: ${navigator.userAgent}
                                         title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
                                     ${isSaved ? 'Saved' : 'Save'}
                                 </button>
-                                <button onclick="togglePlayerAlert('${displayName}', '${playerId}')" 
+                                <button onclick="showNameHistory('${playerId}')"
+                                        style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                                        title="View history">
+                                    History
+                                </button>
+                                <button onclick="confirmRemoveAlert('${displayName}', '${playerId}', this)" 
                                         style="background: #dc3545; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                        title="Remove Alert">
-                                    Remove
+                                        title="Remove Alert (click twice to confirm)">
+                                    Remove Alert
                                 </button>
                             </div>
                         </div>
@@ -2038,21 +2354,18 @@ User Agent: ${navigator.userAgent}
                                     title="View Profile">
                                 Profile
                             </button>
-                            <button onclick="togglePlayerAlert('${displayName}', '${playerId}')" 
-                                    style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                    title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
-                                ${hasAlert ? 'Remove' : 'Add Alert'}
-                            </button>
-                            ${ (dbPlayer && dbPlayer.nameChanged && dbPlayer.previousNames && dbPlayer.previousNames.length > 0) ? `
-                            <button onclick="showNameHistory('${playerId}')" 
+                            ${hasAlert
+                                ? `<button disabled style="background: #6c757d; color: rgba(255,255,255,0.5); border: none; padding: 2px 5px; border-radius: 3px; font-size: 9px; cursor: default;" title="Alert active — manage in Alert Players tab">Alerted ✓</button>`
+                                : `<button onclick="togglePlayerAlert('${displayName}', '${playerId}')" style="background: #28a745; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;" title="Add Alert">Add Alert</button>`
+                            }
+                            <button onclick="showNameHistory('${playerId}')"
                                     style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                    title="View name history">
+                                    title="View history">
                                 History
                             </button>
-                            ` : ''}
-                            <button onclick="removeSavedPlayer('${playerId}')" 
+                            <button onclick="confirmDeleteSavedPlayer('${playerId}', this)" 
                                     style="background: #6c757d; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
-                                    title="Remove from Saved">
+                                    title="Remove from Saved (click twice to confirm)">
                                 Delete
                             </button>
                         </div>
@@ -2540,6 +2853,9 @@ User Agent: ${navigator.userAgent}
                                 <option value="osc_triangle">Triangle beep</option>
                                 <option value="short_burst">Short burst</option>
                                 <option value="long_wobble">Long wobble</option>
+                                <option value="triple_ping">Triple ping</option>
+                                <option value="deep_thud">Deep thud</option>
+                                <option value="rising_sweep">Rising sweep</option>
                             </select>
                         </div>
                         <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 4px;">
@@ -2586,6 +2902,40 @@ User Agent: ${navigator.userAgent}
                                         Check for updates
                                     </button>
                                 </div>
+                        <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 4px; margin-top: 8px;">
+                            <input type="checkbox" id="auto-refresh-toggle"
+                                   ${loadAutoRefreshSettings().enabled ? 'checked' : ''}
+                                   onchange="toggleAutoRefresh(this.checked)" style="margin-right: 8px;">
+                            Auto-refresh page
+                        </label>
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; padding-left:24px;">
+                            <label style="color:inherit; margin:0; font-size:11px;">Every:</label>
+                            <select id="auto-refresh-interval" onchange="changeAutoRefreshInterval(this.value)" style="padding:4px; border-radius:4px; background: rgba(255,255,255,0.05); color: white; border: none; font-size:11px;">
+                                <option value="120000"  ${(loadAutoRefreshSettings().ms||120000)==120000  ?'selected':''}>2 minutes</option>
+                                <option value="180000"  ${(loadAutoRefreshSettings().ms||120000)==180000  ?'selected':''}>3 minutes</option>
+                                <option value="300000"  ${(loadAutoRefreshSettings().ms||120000)==300000  ?'selected':''}>5 minutes</option>
+                                <option value="600000"  ${(loadAutoRefreshSettings().ms||120000)==600000  ?'selected':''}>10 minutes</option>
+                                <option value="900000"  ${(loadAutoRefreshSettings().ms||120000)==900000  ?'selected':''}>15 minutes</option>
+                                <option value="1800000" ${(loadAutoRefreshSettings().ms||120000)==1800000 ?'selected':''}>30 minutes</option>
+                                <option value="3600000" ${(loadAutoRefreshSettings().ms||120000)==3600000 ?'selected':''}>1 hour</option>
+                            </select>
+                        </div>
+                        <div style="border-top: 1px solid rgba(255,255,255,0.1); margin: 10px 0 8px; padding-top: 8px;">
+                            <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 4px;">
+                                <input type="checkbox" id="keep-alive-toggle" onchange="toggleKeepAlive(this.checked)" style="margin-right: 8px;">
+                                Keep tab alive (watchdog)
+                            </label>
+                            <div style="font-size: 10px; color: #6c757d; padding-left: 20px; margin-bottom: 6px;">
+                                Warns before closing &amp; opens a popup that auto-reopens this tab if closed.
+                            </div>
+                            <div id="keep-alive-controls" style="padding-left: 20px; display: none;">
+                                <button onclick="openKeepAliveWatchdogManual()"
+                                        style="background: #17a2b8; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;">
+                                    Open Watchdog Popup
+                                </button>
+                                <div id="keep-alive-notice" style="font-size: 10px; color: #ffc107; margin-top: 4px; display: none;"></div>
+                            </div>
+                        </div>
                         <button onclick="testSound()" 
                                 style="background: #28a745; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-top: 5px;">
                             Test Sound
@@ -2718,6 +3068,16 @@ User Agent: ${navigator.userAgent}
                 // Initialize update checkboxes
                 const autoCheckCb = document.getElementById('auto-check-updates');
                 if (autoCheckCb) autoCheckCb.checked = loadAutoCheckSetting();
+                // Initialize keep-alive toggle
+                try {
+                    const keepAliveCb = document.getElementById('keep-alive-toggle');
+                    if (keepAliveCb) {
+                        const kaEnabled = loadKeepAliveSetting();
+                        keepAliveCb.checked = kaEnabled;
+                        const kaControls = document.getElementById('keep-alive-controls');
+                        if (kaControls) kaControls.style.display = kaEnabled ? 'block' : 'none';
+                    }
+                } catch (e) { console.warn('Could not initialize keep-alive toggle', e); }
                 // initialize sound select
                 try {
                     const soundSelect = document.getElementById('sound-select');
@@ -3267,6 +3627,59 @@ User Agent: ${navigator.userAgent}
         }
     };
 
+    window.toggleAutoRefresh = (enabled) => {
+        const { ms } = loadAutoRefreshSettings();
+        saveAutoRefreshSettings(enabled, ms);
+        if (enabled) {
+            startAutoRefresh(ms);
+        } else {
+            stopAutoRefresh();
+        }
+    };
+
+    window.changeAutoRefreshInterval = (ms) => {
+        ms = parseInt(ms, 10) || 120000;
+        const { enabled } = loadAutoRefreshSettings();
+        saveAutoRefreshSettings(enabled, ms);
+        if (enabled) {
+            startAutoRefresh(ms); // restart with new interval
+        }
+    };
+
+    window.toggleKeepAlive = (enabled) => {
+        saveKeepAliveSetting(enabled);
+        const controls = document.getElementById('keep-alive-controls');
+        if (controls) controls.style.display = enabled ? 'block' : 'none';
+        if (enabled) {
+            startKeepAlive();
+            const opened = openKeepAliveWatchdog();
+            const notice = document.getElementById('keep-alive-notice');
+            if (notice) {
+                if (!opened) {
+                    notice.style.display = 'block';
+                    notice.textContent = '\u26a0 Popup blocked \u2014 click "Open Watchdog Popup" to retry.';
+                } else {
+                    notice.style.display = 'none';
+                }
+            }
+        } else {
+            stopKeepAlive();
+        }
+    };
+
+    window.openKeepAliveWatchdogManual = () => {
+        const opened = openKeepAliveWatchdog();
+        const notice = document.getElementById('keep-alive-notice');
+        if (notice) {
+            if (!opened) {
+                notice.style.display = 'block';
+                notice.textContent = '\u26a0 Popup still blocked \u2014 allow popups for battlemetrics.com in browser settings.';
+            } else {
+                notice.style.display = 'none';
+            }
+        }
+    };
+
     window.toggleMonitoring = () => {
         const btn = document.getElementById('monitoring-btn');
         if (!serverMonitor || !btn) return;
@@ -3383,7 +3796,10 @@ User Agent: ${navigator.userAgent}
             alert('All data for all servers has been permanently deleted!');
             
             // Reload page to ensure clean state
-            setTimeout(() => location.reload(), 1000);
+            setTimeout(() => {
+                suppressKeepAliveGuard = true;
+                location.reload();
+            }, 1000);
         }
     };
 
@@ -3808,7 +4224,48 @@ User Agent: ${navigator.userAgent}
         }
     };
 
-    // Show name history modal for a player
+    // Shared pending-confirm map for double-click confirmations
+    const _pendingConfirm = new Map();
+
+    window.confirmDeleteSavedPlayer = (playerId, btn) => {
+        const key = 'del_' + playerId;
+        if (_pendingConfirm.has(key)) {
+            clearTimeout(_pendingConfirm.get(key));
+            _pendingConfirm.delete(key);
+            window.removeSavedPlayer(playerId);
+        } else {
+            const origText = btn.textContent;
+            const origBg = btn.style.background;
+            btn.textContent = 'Sure?';
+            btn.style.background = '#a71d2a';
+            const t = setTimeout(() => {
+                _pendingConfirm.delete(key);
+                if (btn) { btn.textContent = origText; btn.style.background = origBg; }
+            }, 2000);
+            _pendingConfirm.set(key, t);
+        }
+    };
+
+    window.confirmRemoveAlert = (displayName, playerId, btn) => {
+        const key = 'alert_' + playerId;
+        if (_pendingConfirm.has(key)) {
+            clearTimeout(_pendingConfirm.get(key));
+            _pendingConfirm.delete(key);
+            window.togglePlayerAlert(displayName, playerId);
+        } else {
+            const origText = btn.textContent;
+            const origBg = btn.style.background;
+            btn.textContent = 'Sure?';
+            btn.style.background = '#a71d2a';
+            const t = setTimeout(() => {
+                _pendingConfirm.delete(key);
+                if (btn) { btn.textContent = origText; btn.style.background = origBg; }
+            }, 2000);
+            _pendingConfirm.set(key, t);
+        }
+    };
+
+    // Show player history modal (tabs: Session History, Name History, Notes)
     window.showNameHistory = (playerId) => {
         if (!serverMonitor) return;
         const dbPlayer = serverMonitor.playerDatabase[playerId];
@@ -3817,109 +4274,246 @@ User Agent: ${navigator.userAgent}
             return;
         }
 
-        // Remove existing modal if present
         const existing = document.getElementById('bms-name-history-modal');
         if (existing) existing.remove();
 
         const modal = document.createElement('div');
         modal.id = 'bms-name-history-modal';
-        modal.style.cssText = 'position: fixed; left: 0; top: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 20000; display:flex; align-items:center; justify-content:center;';
+        modal.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.55);z-index:20000;display:flex;align-items:center;justify-content:center;';
+        modal.addEventListener('mousedown', (e) => { if (e.target === modal) modal.remove(); });
 
         const box = document.createElement('div');
-        box.style.cssText = 'background: #2c3e50; color: white; padding: 16px; border-radius: 8px; width: 420px; max-height: 80vh; overflow-y:auto; box-shadow: 0 8px 30px rgba(0,0,0,0.6);';
+        box.style.cssText = 'background:#2c3e50;color:white;padding:16px;border-radius:8px;width:500px;max-width:95vw;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,0.6);';
 
+        // ── Header ──────────────────────────────────────────────────
         const header = document.createElement('div');
-        header.style.cssText = 'display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;';
-        header.innerHTML = `<div style="font-weight:bold; font-size:16px;">Name History</div>`;
-
+        header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-shrink:0;';
+        const isOnline = serverMonitor.currentPlayers.has(playerId);
+        const onlineDot = isOnline ? '<span style="color:#28a745;margin-right:6px;">●</span>' : '<span style="color:#dc3545;margin-right:6px;">●</span>';
+        header.innerHTML = `<div style="font-weight:bold;font-size:15px;">${onlineDot}${dbPlayer.currentName.replace(/</g,'&lt;')}</div>`;
         const closeBtn = document.createElement('button');
-        closeBtn.textContent = 'Close';
-        closeBtn.style.cssText = 'background:#6c757d; color:white; border:none; padding:6px 8px; border-radius:4px; cursor:pointer;';
+        closeBtn.textContent = '✕';
+        closeBtn.style.cssText = 'background:transparent;color:#aaa;border:none;font-size:16px;cursor:pointer;padding:0 4px;';
         closeBtn.onclick = () => modal.remove();
         header.appendChild(closeBtn);
-
         box.appendChild(header);
 
-        const info = document.createElement('div');
-        info.style.cssText = 'font-size:13px; margin-bottom:8px;';
-        info.innerHTML = `
-            <div><strong>Current:</strong> ${dbPlayer.currentName}</div>
-            <div><strong>Original:</strong> ${dbPlayer.originalName || dbPlayer.currentName}</div>
-            <div><strong>ID:</strong> ${dbPlayer.id}</div>
-            <div><strong>First seen:</strong> ${dbPlayer.firstSeen ? new Date(dbPlayer.firstSeen).toLocaleString() : 'N/A'}</div>
-            <div><strong>Last seen:</strong> ${dbPlayer.lastSeen ? new Date(dbPlayer.lastSeen).toLocaleString() : 'N/A'}</div>
-        `;
-        box.appendChild(info);
+        // ── Sub-info ─────────────────────────────────────────────────
+        const subInfo = document.createElement('div');
+        subInfo.style.cssText = 'font-size:11px;color:#adb5bd;margin-bottom:10px;flex-shrink:0;';
+        subInfo.innerHTML = `ID: ${dbPlayer.id} &nbsp;|&nbsp; First seen: ${dbPlayer.firstSeen ? new Date(dbPlayer.firstSeen).toLocaleString() : 'N/A'} &nbsp;|&nbsp; Last seen: ${dbPlayer.lastSeen ? new Date(dbPlayer.lastSeen).toLocaleString() : 'N/A'} &nbsp;|&nbsp; Detections: ${dbPlayer.seenCount || 1}×`;
+        box.appendChild(subInfo);
 
-        const listTitle = document.createElement('div');
-        listTitle.style.cssText = 'font-weight:bold; margin-bottom:6px;';
-        listTitle.textContent = 'Previous names (most recent first):';
-        box.appendChild(listTitle);
+        // ── Tabs ─────────────────────────────────────────────────────
+        const TABS = ['Session History', 'Name History', 'Notes', 'Possible Alts'];
+        let activeTab = 'Session History';
 
-        const list = document.createElement('div');
-        list.style.cssText = 'font-size:13px; color:#e9ecef; margin-bottom:10px;';
-        const _ns = e => (typeof e === 'string' ? e : (e && e.name) || '');
-        const _ts = e => (e && e.changedAt ? new Date(e.changedAt).toLocaleString() : null);
-        const prev = dbPlayer.previousNames && dbPlayer.previousNames.length ? dbPlayer.previousNames.slice().reverse() : [];
-        if (prev.length === 0) {
-            list.innerHTML = '<div style="opacity:0.7;">No previous names recorded</div>';
-        } else {
-            prev.forEach((entry) => {
-                const nameText = _ns(entry);
-                const dateText = _ts(entry);
-                const d = document.createElement('div');
-                d.style.cssText = 'padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.07); display:flex; justify-content:space-between; align-items:baseline; gap:8px;';
-                d.innerHTML = `<span style="font-weight:500;">${nameText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>`
-                    + (dateText ? `<span style="font-size:10px; color:#6c757d; white-space:nowrap;">${dateText}</span>` : `<span style="font-size:10px; color:#6c757d;">date unknown</span>`);
-                list.appendChild(d);
+        const tabBar = document.createElement('div');
+        tabBar.style.cssText = 'display:flex;gap:4px;margin-bottom:10px;flex-shrink:0;';
+
+        const tabContent = document.createElement('div');
+        tabContent.style.cssText = 'overflow-y:auto;flex:1;font-size:12px;';
+
+        const renderTab = (tab) => {
+            activeTab = tab;
+            // Update tab button styles
+            tabBar.querySelectorAll('button').forEach(btn => {
+                btn.style.background = btn.dataset.tab === tab ? '#6f42c1' : 'rgba(255,255,255,0.07)';
+                btn.style.color = btn.dataset.tab === tab ? 'white' : '#adb5bd';
             });
-        }
-        box.appendChild(list);
+            tabContent.innerHTML = '';
 
-        const actions = document.createElement('div');
-        actions.style.cssText = 'display:flex; gap:8px; justify-content:flex-end;';
-
-        const resetBtn = document.createElement('button');
-        resetBtn.textContent = 'Reset History';
-        resetBtn.style.cssText = 'background:#dc3545; color:white; border:none; padding:6px 8px; border-radius:4px; cursor:pointer;';
-        resetBtn.onclick = (() => {
-            let pending = false;
-            let timer = null;
-            return () => {
-                if (pending) {
-                    clearTimeout(timer);
-                    pending = false;
-                    resetBtn.textContent = 'Reset History';
-                    resetBtn.style.background = '#dc3545';
-                    window.resetNameHistory(playerId);
-                    modal.remove();
-                } else {
-                    pending = true;
-                    resetBtn.textContent = 'Sure?';
-                    resetBtn.style.background = '#a71d2a';
-                    timer = setTimeout(() => {
-                        pending = false;
-                        resetBtn.textContent = 'Reset History';
-                        resetBtn.style.background = '#dc3545';
-                    }, 2000);
+            if (tab === 'Session History') {
+                // Build session pairs from the activity log for this player
+                const playerLog = serverMonitor.activityLog.filter(e => e.playerId === playerId);
+                if (playerLog.length === 0) {
+                    tabContent.innerHTML = '<div style="opacity:0.6;padding:8px;">No activity recorded yet.</div>';
+                    return;
                 }
-            };
-        })();
 
-        const exportBtn = document.createElement('button');
-        exportBtn.textContent = 'Export';
-        exportBtn.style.cssText = 'background:#17a2b8; color:white; border:none; padding:6px 8px; border-radius:4px; cursor:pointer;';
-        exportBtn.onclick = () => {
-            const data = JSON.stringify(dbPlayer, null, 2);
-            navigator.clipboard.writeText(data).then(() => alert('Player history copied to clipboard'));
+                // Pair joins with the next leave to show sessions
+                const sessions = [];
+                let pendingJoin = null;
+                for (const entry of playerLog) {
+                    if (entry.action === 'joined') {
+                        pendingJoin = entry;
+                    } else if (entry.action === 'left') {
+                        const joinTime = pendingJoin ? pendingJoin.timestamp : null;
+                        const duration = joinTime ? Math.round((entry.timestamp - joinTime) / 60000) : null;
+                        sessions.push({ join: pendingJoin, leave: entry, duration });
+                        pendingJoin = null;
+                    } else if (entry.action === 'name_changed') {
+                        sessions.push({ nameChange: entry });
+                    }
+                }
+                if (pendingJoin) {
+                    sessions.push({ join: pendingJoin, leave: null, duration: null, stillOnline: isOnline });
+                }
+
+                // Most recent first
+                sessions.reverse();
+
+                let html = `<div style="margin-bottom:6px;color:#adb5bd;">${sessions.length} session(s) / events recorded</div>`;
+                for (const s of sessions) {
+                    if (s.nameChange) {
+                        html += `<div style="padding:6px 8px;margin-bottom:4px;border-radius:4px;background:rgba(255,193,7,0.08);border-left:3px solid #ffc107;">
+                            <span style="color:#ffc107;">✏ Name changed</span>
+                            <span style="color:#adb5bd;margin-left:6px;font-size:10px;">${s.nameChange.time || new Date(s.nameChange.timestamp).toLocaleString()}</span>
+                            <div style="font-size:11px;color:#e9ecef;margin-top:2px;"><span style="text-decoration:line-through;opacity:0.6;">${(s.nameChange.oldName||'?').replace(/</g,'&lt;')}</span> → <strong>${s.nameChange.playerName.replace(/</g,'&lt;')}</strong></div>
+                        </div>`;
+                        continue;
+                    }
+                    const joinStr = s.join ? (s.join.time || new Date(s.join.timestamp).toLocaleString()) : '—';
+                    const leaveStr = s.leave ? (s.leave.time || new Date(s.leave.timestamp).toLocaleString()) : (s.stillOnline ? '<span style="color:#28a745;">Still online</span>' : '—');
+                    const durStr = s.duration !== null ? (s.duration < 60 ? `${s.duration}m` : `${(s.duration/60).toFixed(1)}h`) : '?';
+                    const nameAtJoin = s.join ? s.join.playerName : (s.leave ? s.leave.playerName : '');
+                    html += `<div style="padding:6px 8px;margin-bottom:4px;border-radius:4px;background:rgba(255,255,255,0.04);border-left:3px solid ${s.stillOnline ? '#28a745' : '#6c757d'};">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <span style="color:#28a745;font-size:11px;">▶ ${joinStr}</span>
+                            <span style="color:#6c757d;font-size:10px;">${s.duration !== null ? durStr : ''}</span>
+                            <span style="color:#dc3545;font-size:11px;">◀ ${typeof leaveStr === 'string' ? leaveStr : ''}</span>
+                        </div>
+                        ${nameAtJoin && nameAtJoin !== dbPlayer.currentName ? `<div style="font-size:10px;color:#adb5bd;margin-top:2px;">Playing as: ${nameAtJoin.replace(/</g,'&lt;')}</div>` : ''}
+                    </div>`;
+                }
+                tabContent.innerHTML = html;
+
+            } else if (tab === 'Name History') {
+                const _ns = e => (typeof e === 'string' ? e : (e && e.name) || '');
+                const _ts = e => (e && e.changedAt ? new Date(e.changedAt).toLocaleString() : null);
+                const prev = dbPlayer.previousNames && dbPlayer.previousNames.length ? dbPlayer.previousNames.slice().reverse() : [];
+
+                let html = `<div style="margin-bottom:8px;"><strong>Current:</strong> ${dbPlayer.currentName.replace(/</g,'&lt;')}</div>
+                            <div style="margin-bottom:8px;"><strong>Original:</strong> ${(dbPlayer.originalName || dbPlayer.currentName).replace(/</g,'&lt;')}</div>`;
+                if (prev.length === 0) {
+                    html += '<div style="opacity:0.6;">No previous names recorded.</div>';
+                } else {
+                    html += `<div style="font-weight:bold;margin-bottom:6px;">Previous names (${prev.length}):</div>`;
+                    for (const entry of prev) {
+                        const nameText = _ns(entry).replace(/</g,'&lt;');
+                        const dateText = _ts(entry) || 'date unknown';
+                        html += `<div style="padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.07);display:flex;justify-content:space-between;align-items:baseline;gap:8px;">
+                            <span>${nameText}</span>
+                            <span style="font-size:10px;color:#6c757d;white-space:nowrap;">${dateText}</span>
+                        </div>`;
+                    }
+                }
+
+                // Reset button inline at bottom
+                html += `<div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;">
+                    <button onclick="window.resetNameHistory('${playerId}'); document.getElementById('bms-name-history-modal')?.remove();"
+                            style="background:#dc3545;color:white;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:11px;">Reset History</button>
+                </div>`;
+                tabContent.innerHTML = html;
+
+            } else if (tab === 'Possible Alts') {
+                const alts = detectAlts(playerId);
+                if (alts.length === 0) {
+                    tabContent.innerHTML = `<div style="opacity:0.6;padding:8px;">No alt handoffs detected.<br>
+                        <span style="font-size:10px;">Looking for the relay pattern: this player leaves → candidate joins (or vice versa), ≥${MIN_HANDOFFS} times, at ≥${MIN_HANDOFF_RATE*100}% of sessions. They must not be online at the same time.</span></div>`;
+                } else {
+                    let html = `<div style="font-size:10px;color:#adb5bd;margin-bottom:8px;">Relay pattern detected: one account logs off and the other joins shortly after (up to 30 min). They are rarely online simultaneously.</div>`;
+                    for (const alt of alts) {
+                        const altOnline = serverMonitor.currentPlayers.has(alt.playerId);
+                        const dot = altOnline ? '<span style="color:#28a745;">●</span>' : '<span style="color:#6c757d;">●</span>';
+                        const safeAltId = String(alt.playerId);
+                        const safeAltName = alt.player.currentName.replace(/'/g,"&#39;").replace(/</g,'&lt;');
+                        const overlapBadge = alt.overlap === 0
+                            ? '<span style="color:#28a745;font-size:9px;"> ✓ never overlap</span>'
+                            : `<span style="color:#adb5bd;font-size:9px;"> · overlap: ${alt.overlap}x</span>`;
+                        html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 8px;margin-bottom:4px;border-radius:4px;background:rgba(255,193,7,0.07);border-left:3px solid #ffc107;">
+                            <div>
+                                <div style="font-weight:bold;">${dot} ${alt.player.currentName.replace(/</g,'&lt;')}</div>
+                                <div style="font-size:10px;color:#adb5bd;">
+                                    ID: ${safeAltId} &nbsp;|&nbsp;
+                                    <span title="This player left → candidate joined">→ ${alt.atob}</span> &nbsp;
+                                    <span title="Candidate left → this player joined">← ${alt.btoa}</span> &nbsp;handoffs &nbsp;|&nbsp;
+                                    rate: ${alt.coverage}%${overlapBadge}
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:4px;">
+                                <button onclick="window.open('https://www.battlemetrics.com/players/${safeAltId}','_blank')" style="background:#17a2b8;color:white;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px;">Profile</button>
+                                <button onclick="window.showNameHistory('${safeAltId}')" style="background:#6f42c1;color:white;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px;">History</button>
+                                <button onclick="togglePlayerAlert('${safeAltName}','${safeAltId}')" style="background:#28a745;color:white;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px;">Alert</button>
+                            </div>
+                        </div>`;
+                    }
+                    tabContent.innerHTML = html;
+                }
+
+            } else if (tab === 'Notes') {
+                const existing = serverMonitor.playerNotes && serverMonitor.playerNotes[playerId];
+                const currentText = existing ? existing.text : '';
+                const updatedAt = existing && existing.updatedAt ? new Date(existing.updatedAt).toLocaleString() : null;
+
+                const wrapper = document.createElement('div');
+                if (updatedAt) {
+                    const ts = document.createElement('div');
+                    ts.className = 'bms-note-ts';
+                    ts.style.cssText = 'font-size:10px;color:#6c757d;margin-bottom:6px;';
+                    ts.textContent = `Last updated: ${updatedAt}`;
+                    wrapper.appendChild(ts);
+                }
+                const textarea = document.createElement('textarea');
+                textarea.value = currentText;
+                textarea.placeholder = 'Add your notes about this player here…';
+                textarea.style.cssText = 'width:100%;height:130px;resize:vertical;background:rgba(255,255,255,0.07);color:white;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:8px;font-size:12px;box-sizing:border-box;';
+                wrapper.appendChild(textarea);
+
+                const btnRow = document.createElement('div');
+                btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:8px;';
+
+                const saveNoteBtn = document.createElement('button');
+                saveNoteBtn.textContent = 'Save Note';
+                saveNoteBtn.style.cssText = 'background:#28a745;color:white;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:11px;';
+                saveNoteBtn.onclick = () => {
+                    serverMonitor.setPlayerNote(playerId, textarea.value);
+                    serverMonitor.updateDatabaseDisplay();
+                    saveNoteBtn.textContent = 'Saved ✓';
+                    saveNoteBtn.style.background = '#17a2b8';
+                    setTimeout(() => { saveNoteBtn.textContent = 'Save Note'; saveNoteBtn.style.background = '#28a745'; }, 1500);
+                    // Update or create the timestamp div
+                    let tsDiv = wrapper.querySelector('.bms-note-ts');
+                    if (!tsDiv) {
+                        tsDiv = document.createElement('div');
+                        tsDiv.className = 'bms-note-ts';
+                        tsDiv.style.cssText = 'font-size:10px;color:#6c757d;margin-bottom:6px;';
+                        wrapper.insertBefore(tsDiv, textarea);
+                    }
+                    tsDiv.textContent = `Last updated: ${new Date().toLocaleString()}`;
+                };
+
+                const clearNoteBtn = document.createElement('button');
+                clearNoteBtn.textContent = 'Clear';
+                clearNoteBtn.style.cssText = 'background:#dc3545;color:white;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:11px;';
+                clearNoteBtn.onclick = () => {
+                    textarea.value = '';
+                    serverMonitor.setPlayerNote(playerId, '');
+                    serverMonitor.updateDatabaseDisplay();
+                };
+
+                btnRow.appendChild(clearNoteBtn);
+                btnRow.appendChild(saveNoteBtn);
+                wrapper.appendChild(btnRow);
+                tabContent.appendChild(wrapper);
+            }
         };
 
-        actions.appendChild(exportBtn);
-        actions.appendChild(resetBtn);
-        box.appendChild(actions);
+        TABS.forEach(tab => {
+            const btn = document.createElement('button');
+            btn.textContent = tab;
+            btn.dataset.tab = tab;
+            const isAltTab = tab === 'Possible Alts';
+            btn.style.cssText = `background:rgba(255,255,255,0.07);color:${isAltTab ? '#ffc107' : '#adb5bd'};border:none;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:11px;`;
+            btn.onclick = () => renderTab(tab);
+            tabBar.appendChild(btn);
+        });
 
+        box.appendChild(tabBar);
+        box.appendChild(tabContent);
         modal.appendChild(box);
         document.body.appendChild(modal);
+        renderTab('Session History');
     };
 
     window.resetNameHistory = (playerId) => {
@@ -3933,6 +4527,232 @@ User Agent: ${navigator.userAgent}
         serverMonitor.updateSavedPlayersDisplay();
         serverMonitor.updateAlertDisplay();
         alert('Name history reset for ' + (dbPlayer.currentName || playerId));
+    };
+
+    // Quick Notes shortcut — opens History modal directly on the Notes tab
+    window.showPlayerNote = (playerId) => {
+        window.showNameHistory(playerId);
+        // After modal renders, switch to Notes tab
+        setTimeout(() => {
+            const tabBar = document.querySelector('#bms-name-history-modal [data-tab="Notes"]');
+            if (tabBar) tabBar.click();
+        }, 50);
+    };
+
+    window.showPlayerAlts = (playerId) => {
+        window.showNameHistory(playerId);
+        // After modal renders, switch to Possible Alts tab
+        setTimeout(() => {
+            const tabBtn = document.querySelector('#bms-name-history-modal [data-tab="Possible Alts"]');
+            if (tabBtn) tabBtn.click();
+        }, 50);
+    };
+
+    // ── Alts Detection ───────────────────────────────────────────────────────
+    // Detects the HANDOFF pattern used by alt accounts:
+    //   A leaves ──[0 – SWITCH_MAX min]──► B joins   (A→B handoff)
+    //   B leaves ──[0 – SWITCH_MAX min]──► A joins   (B→A handoff)
+    //
+    // True alts swap accounts — they are almost never online simultaneously.
+    // This is the opposite of "session mirroring" (players who play together).
+    //
+    // Thresholds tuned for real usage: fast switch ~3 min, slow switch ~30 min.
+    // Requires ≥ MIN_HANDOFFS total handoffs AND a ≥ MIN_RATE fraction of the
+    // target's leave events, and the candidate must NOT already be online when the
+    // target leaves (otherwise they're just co-players, not alts).
+    const SWITCH_MAX_MS    = 30 * 60 * 1000; // 30 min — covers slow/chilled switches
+    const MIN_HANDOFFS     = 3;              // ≥3 total (A→B + B→A)
+    const MIN_HANDOFF_RATE = 0.25;           // ≥25% of target's leave events
+
+    // Build complete sessions (join→leave pairs) for a player.
+    const buildSessions = (log, pid) => {
+        const sessions = [];
+        let pending = null;
+        for (const e of log) {
+            if (e.playerId !== pid) continue;
+            if (e.action === 'joined') {
+                pending = e;
+            } else if (e.action === 'left' && pending) {
+                sessions.push({ join: pending.timestamp, leave: e.timestamp });
+                pending = null;
+            }
+        }
+        if (pending) sessions.push({ join: pending.timestamp, leave: null }); // still online
+        return sessions;
+    };
+
+    // Returns true if a player (given their sessions) was online at timestamp t.
+    const wasOnlineAt = (sessions, t) => {
+        for (const s of sessions) {
+            const leaveT = s.leave ?? Date.now();
+            if (s.join <= t && t <= leaveT) return true;
+        }
+        return false;
+    };
+
+    // Count how many of targetSessions temporally overlap with candSessions.
+    // Used as an informational "how often were they on together" signal.
+    const countOverlap = (targetSessions, candSessions) => {
+        let n = 0;
+        for (const tS of targetSessions) {
+            if (!tS.leave) continue;
+            for (const cS of candSessions) {
+                const cLeave = cS.leave ?? Date.now();
+                if (Math.max(tS.join, cS.join) < Math.min(tS.leave, cLeave)) {
+                    n++;
+                    break;
+                }
+            }
+        }
+        return n;
+    };
+
+    const detectAlts = (targetId) => {
+        if (!serverMonitor) return [];
+        const log = serverMonitor.activityLog;
+
+        const targetLeaveEvts = log.filter(e => e.playerId === targetId && e.action === 'left');
+        const targetJoinEvts  = log.filter(e => e.playerId === targetId && e.action === 'joined');
+        if (targetLeaveEvts.length === 0) return [];
+
+        const targetSessions = buildSessions(log, targetId);
+
+        // Collect all other player IDs seen in the log
+        const otherIds = new Set();
+        for (const e of log) {
+            if (e.playerId && e.playerId !== targetId) otherIds.add(e.playerId);
+        }
+
+        const results = [];
+        for (const pid of otherIds) {
+            const candJoinEvts  = log.filter(e => e.playerId === pid && e.action === 'joined');
+            const candLeaveEvts = log.filter(e => e.playerId === pid && e.action === 'left');
+            const candSessions  = buildSessions(log, pid);
+
+            // ── A→B handoffs: target leaves (and candidate is NOT already online),
+            //    then candidate joins within the switch window.
+            let atob = 0;
+            const usedCandJoins = new Set();
+            for (const tLeave of targetLeaveEvts) {
+                // Skip: candidate was already online when target left → they're co-players
+                if (wasOnlineAt(candSessions, tLeave.timestamp)) continue;
+                let bestIdx = -1, bestDiff = Infinity;
+                for (let i = 0; i < candJoinEvts.length; i++) {
+                    if (usedCandJoins.has(i)) continue;
+                    const diff = candJoinEvts[i].timestamp - tLeave.timestamp;
+                    if (diff >= 0 && diff <= SWITCH_MAX_MS && diff < bestDiff) {
+                        bestDiff = diff;
+                        bestIdx = i;
+                    }
+                }
+                if (bestIdx !== -1) { atob++; usedCandJoins.add(bestIdx); }
+            }
+
+            // ── B→A handoffs: candidate leaves (and target is NOT already online),
+            //    then target joins within the switch window.
+            let btoa = 0;
+            const usedTargetJoins = new Set();
+            for (const cLeave of candLeaveEvts) {
+                if (wasOnlineAt(targetSessions, cLeave.timestamp)) continue;
+                let bestIdx = -1, bestDiff = Infinity;
+                for (let i = 0; i < targetJoinEvts.length; i++) {
+                    if (usedTargetJoins.has(i)) continue;
+                    const diff = targetJoinEvts[i].timestamp - cLeave.timestamp;
+                    if (diff >= 0 && diff <= SWITCH_MAX_MS && diff < bestDiff) {
+                        bestDiff = diff;
+                        bestIdx = i;
+                    }
+                }
+                if (bestIdx !== -1) { btoa++; usedTargetJoins.add(bestIdx); }
+            }
+
+            const total = atob + btoa;
+            if (total < MIN_HANDOFFS) continue;
+
+            // Handoff rate: what fraction of the target's leave events triggered a handoff
+            const rate = total / Math.max(targetLeaveEvts.length, 1);
+            if (rate < MIN_HANDOFF_RATE) continue;
+
+            // Overlap: how many of target's complete sessions had candidate also online
+            const completeTgt = targetSessions.filter(s => s.leave !== null);
+            const overlap = countOverlap(completeTgt, candSessions);
+
+            results.push({
+                playerId: pid,
+                matches: total,
+                atob,
+                btoa,
+                overlap,
+                coverage: Math.round(rate * 100),
+                player: serverMonitor.playerDatabase[pid] || { currentName: `Player ${pid}`, id: pid }
+            });
+        }
+
+        return results.sort((a, b) => b.matches - a.matches);
+    };
+
+    window.showAltsModal = (playerId) => {
+        if (!serverMonitor) return;
+        const dbPlayer = serverMonitor.playerDatabase[playerId];
+        const displayName = dbPlayer ? dbPlayer.currentName : `Player ${playerId}`;
+
+        const existing = document.getElementById('bms-alts-modal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'bms-alts-modal';
+        modal.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.55);z-index:20001;display:flex;align-items:center;justify-content:center;';
+        modal.addEventListener('mousedown', (e) => { if (e.target === modal) modal.remove(); });
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#2c3e50;color:white;padding:16px;border-radius:8px;width:460px;max-width:95vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,0.6);';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-shrink:0;';
+        header.innerHTML = `<div style="font-weight:bold;font-size:14px;">🔍 Possible Alts — ${displayName.replace(/</g,'&lt;')}</div>`;
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = '✕';
+        closeBtn.style.cssText = 'background:transparent;color:#aaa;border:none;font-size:16px;cursor:pointer;';
+        closeBtn.onclick = () => modal.remove();
+        header.appendChild(closeBtn);
+        box.appendChild(header);
+
+        const desc = document.createElement('div');
+        desc.style.cssText = 'font-size:10px;color:#adb5bd;margin-bottom:10px;flex-shrink:0;';
+        desc.textContent = `Players who joined or left within ~5 minutes of ${displayName} at least twice — potential alts or frequent co-players.`;
+        box.appendChild(desc);
+
+        const content = document.createElement('div');
+        content.style.cssText = 'overflow-y:auto;flex:1;font-size:12px;';
+
+        const alts = detectAlts(playerId);
+        if (alts.length === 0) {
+            content.innerHTML = '<div style="opacity:0.6;padding:8px;">No suspicious timing matches found.</div>';
+        } else {
+            let html = '';
+            for (const alt of alts) {
+                const isOnline = serverMonitor.currentPlayers.has(alt.playerId);
+                const dot = isOnline ? '<span style="color:#28a745;">●</span>' : '<span style="color:#6c757d;">●</span>';
+                const safeId = String(alt.playerId);
+                const safeName = alt.player.currentName.replace(/'/g,"&#39;").replace(/</g,'&lt;');
+                html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 8px;margin-bottom:4px;border-radius:4px;background:rgba(255,193,7,0.07);border-left:3px solid #ffc107;">
+                    <div>
+                        <div style="font-weight:bold;">${dot} ${alt.player.currentName.replace(/</g,'&lt;')}</div>
+                        <div style="font-size:10px;color:#adb5bd;">ID: ${safeId} &nbsp;|&nbsp; ${alt.matches} timing match${alt.matches > 1 ? 'es' : ''}</div>
+                    </div>
+                    <div style="display:flex;gap:4px;">
+                        <button onclick="window.open('https://www.battlemetrics.com/players/${safeId}','_blank')" style="background:#17a2b8;color:white;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px;">Profile</button>
+                        <button onclick="window.showNameHistory('${safeId}')" style="background:#6f42c1;color:white;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px;">History</button>
+                        <button onclick="togglePlayerAlert('${safeName}','${safeId}')" style="background:#28a745;color:white;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px;">Alert</button>
+                    </div>
+                </div>`;
+            }
+            content.innerHTML = html;
+        }
+
+        box.appendChild(content);
+        modal.appendChild(box);
+        document.body.appendChild(modal);
     };
 
     // Filter functions
@@ -4003,6 +4823,11 @@ User Agent: ${navigator.userAgent}
             mainLine = `✏ <span style="opacity:0.65;text-decoration:line-through">${oldName}</span> <span style="opacity:0.75">→</span> <strong>${entry.playerName}</strong>`;
             actionColor = '#ffc107';
             actionLabel = 'Name Changed';
+        } else if (entry.action === 'alt_detected') {
+            const altName = entry.altPlayerName || `Player ${entry.altPlayerId}`;
+            mainLine = `🔍 <strong>${entry.playerName}</strong> <span style="font-weight:normal;opacity:0.85">may be an alt of</span> <strong>${altName}</strong>`;
+            actionColor = '#ffc107';
+            actionLabel = `Alt Suspected · ${entry.altMatches} sessions · ${entry.altCoverage}%`;
         } else {
             mainLine = `${entry.playerName} ${entry.action}`;
             actionLabel = entry.action;
@@ -4036,7 +4861,10 @@ User Agent: ${navigator.userAgent}
                     <button onclick="savePlayer('${safeName}', '${safeId}')"
                             style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                             title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>${isSaved ? 'Saved' : 'Save'}</button>
-                    ${showHistory ? `<button onclick="showNameHistory('${safeId}')" style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;" title="View name history">History</button>` : ''}
+                    <button onclick="showPlayerNote('${safeId}')"
+                            style="background: ${(serverMonitor && serverMonitor.playerNotes && serverMonitor.playerNotes[safeId]) ? '#17a2b8' : '#495057'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
+                            title="Notes">Notes</button>
+                    <button onclick="showNameHistory('${safeId}')" style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;" title="View session history">History</button>
                 </div>
             </div>
         `;
@@ -4496,6 +5324,23 @@ User Agent: ${navigator.userAgent}
         localStorage.removeItem('bms_debug_autoexport');
         localStorage.removeItem('bms_auto_check_updates');
         localStorage.removeItem(MENU_VISIBLE_KEY);
+        localStorage.removeItem(AUTO_REFRESH_ENABLED_KEY);
+        localStorage.removeItem(AUTO_REFRESH_MS_KEY);
+        localStorage.removeItem(KEEP_ALIVE_KEY);
+        localStorage.removeItem(KEEP_ALIVE_URL_KEY);
+        stopAutoRefresh();
+        stopKeepAlive();
+
+        // Update auto-refresh UI
+        const arToggle = document.getElementById('auto-refresh-toggle');
+        if (arToggle) arToggle.checked = false;
+        const arSelect = document.getElementById('auto-refresh-interval');
+        if (arSelect) arSelect.value = '120000';
+        // Update keep-alive UI
+        const kaToggle = document.getElementById('keep-alive-toggle');
+        if (kaToggle) kaToggle.checked = false;
+        const kaControls = document.getElementById('keep-alive-controls');
+        if (kaControls) kaControls.style.display = 'none';
 
         // Server-specific settings if serverMonitor exists
         if (typeof ALERT_SETTINGS_KEY !== 'undefined' && ALERT_SETTINGS_KEY) {
@@ -4743,6 +5588,9 @@ User Agent: ${navigator.userAgent}
                 // Remove common CSS properties and values
                 cleaned = cleaned.replace(/(display|margin|padding|font|color|background|border|width|height|position|top|left|right|bottom):[^;]*;?/gi, '');
                 
+                // Remove CSS pseudo-class/attribute selector sequences (e.g. :hover,:focus,.active,[disabled])
+                cleaned = cleaned.replace(/(?::(?:hover|focus|active|disabled|checked|visited|focus-within|focus-visible|placeholder-shown)|\.(?:focus|active|disabled|hover)(?::[-\w]+)*|\[disabled\]|fieldset\[disabled\])[\s,]*(?:(?::[-\w]+|\.[\w-]+|\[[\w\s="'-]+\]|[\w-]+\[[\w\s="'-]+\])[\s,]*)*/gi, '');
+                
                 // Remove "Real-time player tracking & alerts" text
                 cleaned = cleaned.replace(/Real-time\s+player\s+tracking\s*&\s*alerts/gi, '');
                 
@@ -4795,7 +5643,7 @@ User Agent: ${navigator.userAgent}
             for (const selector of selectors) {
                 serverNameElement = document.querySelector(selector);
                 if (serverNameElement) {
-                    rawText = serverNameElement.textContent || serverNameElement.innerText || '';
+                    rawText = serverNameElement.innerText || serverNameElement.textContent || '';
                     const cleanedName = cleanServerName(rawText);
                     
                     // Only accept if we have a reasonable server name (not empty, not just CSS)
@@ -4936,7 +5784,21 @@ User Agent: ${navigator.userAgent}
         };
         
         createUI();
-        
+
+        // Start auto-refresh if it was enabled before the last reload
+        const _arSettings = loadAutoRefreshSettings();
+        if (_arSettings.enabled) {
+            startAutoRefresh(_arSettings.ms);
+        }
+
+        // Re-apply keep-alive protection if previously enabled.
+        // Audio anti-throttle + beforeunload guard start immediately.
+        // The watchdog popup cannot auto-reopen without a user gesture —
+        // user must click "Open Watchdog Popup" in Settings after a reload.
+        if (loadKeepAliveSetting()) {
+            startKeepAlive();
+        }
+
         // Update server ID and name display
         setTimeout(() => {
             const serverIdSpan = document.getElementById('current-server-id');
