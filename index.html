@@ -3,688 +3,196 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BattleMetrics Rust Analytics - Advanced Player & Server Monitoring</title>
-    <meta name="description" content="Professional BattleMetrics enhancement tools for Rust players and server administrators. Get detailed player analytics, server monitoring, and real-time alerts.">
+    <title>BMOversight | The Ultimate Rust Analytics Toolkit</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
+        
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            line-height: 1.6;
-            color: #e0e0e0;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-            min-height: 100vh;
+            font-family: 'Inter', sans-serif;
+            background-color: #0a0a0b;
+            color: #e4e4e7;
+            overflow-x: hidden;
         }
 
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 20px;
+        .hero-gradient {
+            background: radial-gradient(circle at 50% 50%, #1e293b 0%, #0a0a0b 100%);
         }
 
-        header {
-            background: rgba(26, 26, 46, 0.95);
-            backdrop-filter: blur(10px);
-            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.3);
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        .accent-glow {
+            box-shadow: 0 0 20px rgba(239, 68, 68, 0.2);
         }
 
-        nav {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 1rem 0;
-        }
-
-        .logo {
-            font-size: 1.8rem;
-            font-weight: bold;
-            color: #ffffff;
-        }
-
-        .nav-links {
-            display: flex;
-            list-style: none;
-            gap: 2rem;
-        }
-
-        .nav-links a {
-            text-decoration: none;
-            color: #e0e0e0;
-            font-weight: 500;
-            transition: color 0.3s;
-        }
-
-        .nav-links a:hover {
-            color: #64b5f6;
-        }
-
-        .hero {
-            text-align: center;
-            padding: 4rem 0;
-            color: white;
-        }
-
-        .hero h1 {
-            font-size: 3.5rem;
-            margin-bottom: 1rem;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
-        }
-
-        .hero p {
-            font-size: 1.3rem;
-            margin-bottom: 2rem;
-            opacity: 0.9;
-        }
-
-        .cta-buttons {
-            display: flex;
-            gap: 1rem;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-
-        .btn {
-            display: inline-block;
-            padding: 1rem 2rem;
-            border-radius: 50px;
-            text-decoration: none;
-            font-weight: bold;
-            transition: all 0.3s;
-            border: none;
-            cursor: pointer;
-            font-size: 1.1rem;
-        }
-
-        .btn-primary {
-            background: #28a745;
-            color: white;
-            box-shadow: 0 4px 15px rgba(40, 167, 69, 0.4);
-        }
-
-        .btn-primary:hover {
-            background: #218838;
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(40, 167, 69, 0.6);
-        }
-
-        .btn-secondary {
-            background: #17a2b8;
-            color: white;
-            box-shadow: 0 4px 15px rgba(23, 162, 184, 0.4);
-        }
-
-        .btn-secondary:hover {
-            background: #138496;
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(23, 162, 184, 0.6);
-        }
-
-        .section {
-            padding: 4rem 0;
-        }
-
-        .section-white {
-            background: #1e1e2e;
-        }
-
-        .section-gray {
-            background: #252540;
-        }
-
-        .section-title {
-            text-align: center;
-            font-size: 2.5rem;
-            margin-bottom: 3rem;
-            color: #ffffff;
-        }
-
-        .features-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 2rem;
-            margin-bottom: 3rem;
-        }
-
-        .feature-card {
-            background: #2a2a3e;
-            padding: 2rem;
-            border-radius: 15px;
-            box-shadow: 0 5px 25px rgba(0, 0, 0, 0.3);
-            transition: transform 0.3s;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .feature-card:hover {
+        .step-card:hover {
             transform: translateY(-5px);
+            transition: all 0.3s ease;
         }
 
-        .feature-icon {
-            font-size: 2.5rem;
-            margin-bottom: 1rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 50%;
-            width: 70px;
-            height: 70px;
-        }
-
-        .feature-card h3 {
-            font-size: 1.5rem;
-            margin-bottom: 1rem;
-            color: #ffffff;
-        }
-
-        .feature-card p {
-            color: #b0b0b0;
-            line-height: 1.6;
-        }
-
-        .installation {
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            color: white;
-            text-align: center;
-        }
-
-        .installation-steps {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 2rem;
-            margin-top: 3rem;
-        }
-
-        .step {
-            background: rgba(255, 255, 255, 0.1);
-            padding: 2rem;
-            border-radius: 15px;
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-
-        .step-number {
-            display: inline-block;
-            width: 40px;
-            height: 40px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border-radius: 50%;
-            line-height: 40px;
-            font-weight: bold;
-            margin-bottom: 1rem;
-        }
-
-        .download-section {
-            text-align: center;
-            padding: 3rem 0;
-        }
-
-        .download-cards {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 2rem;
-            margin-top: 2rem;
-        }
-
-        .download-card {
-            background: #2a2a3e;
-            padding: 2rem;
-            border-radius: 15px;
-            box-shadow: 0 5px 25px rgba(0, 0, 0, 0.3);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .download-card p {
-            color: #b0b0b0;
-        }
-
-        .download-card h3 {
-            font-size: 1.8rem;
-            margin-bottom: 1rem;
-            color: #ffffff;
-        }
-
-        .feature-list {
-            text-align: left;
-            margin: 1.5rem 0;
-        }
-
-        .feature-list li {
-            margin-bottom: 0.5rem;
-            padding-left: 1.5rem;
-            position: relative;
-        }
-
-        .feature-list li::before {
-            content: "✓";
-            position: absolute;
-            left: 0;
-            color: #28a745;
-            font-weight: bold;
-        }
-
-        footer {
-            background: #1a1a2e;
-            color: white;
-            text-align: center;
-            padding: 2rem 0;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        /* Modal Styles */
-        .modal-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.7);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            z-index: 10000;
-            backdrop-filter: blur(5px);
-        }
-
-        .modal-content {
-            background: #2a2a3e;
-            border-radius: 15px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
-            max-width: 500px;
-            width: 90%;
-            max-height: 90vh;
-            overflow-y: auto;
-            animation: modalSlideIn 0.3s ease-out;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        @keyframes modalSlideIn {
-            from {
-                opacity: 0;
-                transform: translateY(-50px) scale(0.9);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0) scale(1);
-            }
-        }
-
-        .modal-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 1.5rem 2rem 1rem 2rem;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .modal-header h3 {
-            color: #ffffff;
-            font-size: 1.5rem;
-            margin: 0;
-        }
-
-        .modal-close {
-            background: none;
-            border: none;
-            font-size: 2rem;
-            color: #b0b0b0;
-            cursor: pointer;
-            padding: 0;
-            width: 30px;
-            height: 30px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 50%;
-            transition: all 0.3s;
-        }
-
-        .modal-close:hover {
-            background: rgba(255, 255, 255, 0.1);
-            color: #ffffff;
-        }
-
-        .modal-body {
-            padding: 2rem;
-            text-align: center;
-        }
-
-        .modal-body p {
-            color: #b0b0b0;
-            margin-bottom: 1rem;
-            font-size: 1.1rem;
-            line-height: 1.6;
-        }
-
-        .modal-body p:last-child {
-            font-weight: bold;
-            color: #ffffff;
-            margin-bottom: 0;
-        }
-
-        .modal-footer {
-            padding: 1rem 2rem 2rem 2rem;
-            display: flex;
-            gap: 1rem;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-
-        .modal-btn {
-            flex: 1;
-            min-width: 150px;
-            padding: 0.75rem 1.5rem;
-            font-size: 1rem;
-        }
-
-        @media (max-width: 600px) {
-            .modal-footer {
-                flex-direction: column;
-            }
-            
-            .modal-btn {
-                width: 100%;
-            }
-        }
-
-        @media (max-width: 768px) {
-            .hero h1 {
-                font-size: 2.5rem;
-            }
-            
-            .hero p {
-                font-size: 1.1rem;
-            }
-            
-            .cta-buttons {
-                flex-direction: column;
-                align-items: center;
-            }
-            
-            .nav-links {
-                display: none;
-            }
+        .modal-bg {
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(8px);
         }
     </style>
 </head>
-<body>
-    <header>
-        <nav class="container">
-            <div class="logo">BM Analytics</div>
-            <ul class="nav-links">
-                <li><a href="#features">Features</a></li>
-                <li><a href="#installation">Installation</a></li>
-                <li><a href="#download">Download</a></li>
-                <li><a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank">GitHub</a></li>
-                <li><a href="https://discord.gg/bEPn9UH9Xw" target="_blank">Discord</a></li>
-            </ul>
-        </nav>
-    </header>
+<body class="antialiased">
 
-    <section class="hero">
-        <div class="container">
-            <h1>BattleMetrics Rust Analytics</h1>
-            <p>Professional-grade player analytics and server monitoring tools for BattleMetrics</p>
-            <div class="cta-buttons">
-                <a href="#download" class="btn btn-primary">Download Scripts</a>
-                <a href="#features" class="btn btn-secondary">View Features</a>
-                <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" class="btn btn-secondary">GitHub</a>
-                <a href="https://discord.gg/bEPn9UH9Xw" target="_blank" class="btn btn-secondary">Discord</a>
+    <!-- Nav -->
+    <nav class="flex justify-between items-center p-6 max-w-7xl mx-auto">
+        <div class="flex items-center gap-2">
+            <div class="w-8 h-8 bg-red-600 rounded flex items-center justify-center font-bold text-white">BM</div>
+            <span class="text-xl font-bold tracking-tight">OVERSIGHT</span>
+        </div>
+        <div class="hidden md:flex gap-8 text-sm font-medium text-gray-400">
+            <a href="#features" class="hover:text-white transition">Features</a>
+            <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" class="hover:text-white transition">GitHub</a>
+            <a href="#" class="hover:text-white transition">Discord</a>
+        </div>
+        <button onclick="openDownloadModal()" class="bg-red-600 hover:bg-red-700 text-white px-5 py-2 rounded-full text-sm font-semibold transition accent-glow">
+            Download Now
+        </button>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero-gradient relative pt-20 pb-32 px-6 overflow-hidden">
+        <div class="max-w-4xl mx-auto text-center relative z-10">
+            <span class="bg-red-900/30 text-red-400 px-4 py-1.5 rounded-full text-xs font-bold uppercase tracking-widest border border-red-800/50">
+                Built for Competitive Rust
+            </span>
+            <h1 class="text-5xl md:text-7xl font-extrabold mt-8 mb-6 leading-tight">
+                Dominate BattleMetrics <br/>
+                <span class="text-transparent bg-clip-text bg-gradient-to-r from-red-500 to-orange-400">With Total Oversight.</span>
+            </h1>
+            <p class="text-gray-400 text-lg md:text-xl max-w-2xl mx-auto mb-10 leading-relaxed">
+                Track rivals, monitor server pops, and log player activity in real-time. The most advanced user script for professional Rust players and group leaders.
+            </p>
+            <div class="flex flex-col sm:flex-row justify-center gap-4">
+                <button onclick="openDownloadModal()" class="bg-white text-black px-8 py-4 rounded-xl font-bold text-lg hover:bg-gray-200 transition">
+                    Get Started Free
+                </button>
+                <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" class="bg-zinc-800 text-white px-8 py-4 rounded-xl font-bold text-lg hover:bg-zinc-700 transition flex items-center justify-center gap-2">
+                    <i class="fab fa-github"></i> View Source
+                </a>
+            </div>
+        </div>
+
+        <!-- Decorative Elements -->
+        <div class="absolute top-1/2 left-0 w-64 h-64 bg-red-600/10 rounded-full blur-[120px]"></div>
+        <div class="absolute bottom-0 right-0 w-96 h-96 bg-orange-600/5 rounded-full blur-[150px]"></div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="py-24 px-6 max-w-7xl mx-auto">
+        <div class="grid md:grid-cols-3 gap-8">
+            <!-- Feature 1 -->
+            <div class="bg-zinc-900/50 p-8 rounded-2xl border border-zinc-800/50">
+                <div class="w-12 h-12 bg-red-600/20 rounded-lg flex items-center justify-center mb-6">
+                    <i class="fas fa-users text-red-500 text-xl"></i>
+                </div>
+                <h3 class="text-xl font-bold mb-3">Player Tracking</h3>
+                <p class="text-zinc-400 text-sm leading-relaxed">
+                    Automatically track player sessions, first-seen dates, and total playtime directly on the player profile. Never wonder if a new player is a smurf again.
+                </p>
+            </div>
+            <!-- Feature 2 -->
+            <div class="bg-zinc-900/50 p-8 rounded-2xl border border-zinc-800/50">
+                <div class="w-12 h-12 bg-orange-600/20 rounded-lg flex items-center justify-center mb-6">
+                    <i class="fas fa-server text-orange-500 text-xl"></i>
+                </div>
+                <h3 class="text-xl font-bold mb-3">Server Monitoring</h3>
+                <p class="text-zinc-400 text-sm leading-relaxed">
+                    Real-time server population monitoring with custom alerts. Get notified when a server hits a specific pop or when rival groups log in.
+                </p>
+            </div>
+            <!-- Feature 3 -->
+            <div class="bg-zinc-900/50 p-8 rounded-2xl border border-zinc-800/50">
+                <div class="w-12 h-12 bg-blue-600/20 rounded-lg flex items-center justify-center mb-6">
+                    <i class="fas fa-history text-blue-500 text-xl"></i>
+                </div>
+                <h3 class="text-xl font-bold mb-3">Activity Logging</h3>
+                <p class="text-zinc-400 text-sm leading-relaxed">
+                    Integrated logging system that saves player encounters and server history locally. Export data for clan spreadsheets or strategic analysis.
+                </p>
             </div>
         </div>
     </section>
 
-    <!-- Tampermonkey Modal -->
-    <div id="tampermonkey-modal" class="modal-overlay" style="display: none;">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>🔧 Tampermonkey Required</h3>
-                <button class="modal-close" onclick="closeTampermonkeyModal()">&times;</button>
+    <!-- Download Modal -->
+    <div id="downloadModal" class="fixed inset-0 z-50 modal-bg flex items-center justify-center p-4 hidden">
+        <div class="bg-zinc-900 w-full max-w-md rounded-3xl border border-zinc-800 overflow-hidden relative">
+            <button onclick="closeDownloadModal()" class="absolute top-4 right-4 text-zinc-500 hover:text-white">
+                <i class="fas fa-times"></i>
+            </button>
+            
+            <div class="p-8 text-center" id="modalStep1">
+                <div class="w-16 h-16 bg-zinc-800 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                    <img src="https://www.tampermonkey.net/images/icon128.png" class="w-10 h-10" alt="Tampermonkey">
+                </div>
+                <h2 class="text-2xl font-bold mb-2">Requirement Check</h2>
+                <p class="text-zinc-400 mb-8">Do you have the <strong>Tampermonkey</strong> browser extension installed?</p>
+                
+                <div class="flex flex-col gap-3">
+                    <button onclick="showStep2()" class="w-full bg-green-600 hover:bg-green-700 py-3 rounded-xl font-bold transition">
+                        Yes, I have it
+                    </button>
+                    <a href="https://www.tampermonkey.net/" target="_blank" class="w-full bg-zinc-800 hover:bg-zinc-700 py-3 rounded-xl font-bold transition">
+                        No, take me there
+                    </a>
+                </div>
             </div>
-            <div class="modal-body">
-                <p>These scripts require the Tampermonkey browser extension to function properly.</p>
-                <p><strong>Do you have Tampermonkey installed?</strong></p>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-primary modal-btn" onclick="proceedToDownload()">
-                    ✓ Yes, I have it
-                </button>
-                <button class="btn btn-secondary modal-btn" onclick="installTampermonkey()">
-                    ✗ No, install it first
-                </button>
+
+            <div class="p-8 text-center hidden" id="modalStep2">
+                <div class="w-16 h-16 bg-red-600/20 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                    <i class="fas fa-file-code text-red-500 text-2xl"></i>
+                </div>
+                <h2 class="text-2xl font-bold mb-2">Final Step</h2>
+                <p class="text-zinc-400 mb-8">Click the button below to install <strong>BMOversight</strong> via Tampermonkey.</p>
+                
+                <a href="https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js" class="inline-block w-full bg-red-600 hover:bg-red-700 py-3 rounded-xl font-bold transition">
+                    Install Script
+                </a>
+                <p class="mt-4 text-xs text-zinc-500">The raw .js file will open in Tampermonkey for confirmation.</p>
             </div>
         </div>
     </div>
 
-    <section id="features" class="section section-white">
-        <div class="container">
-            <h2 class="section-title">Powerful Analytics Features</h2>
-            <div class="features-grid">
-                <div class="feature-card">
-                    <span class="feature-icon">⏱️</span>
-                    <h3>True Rust Hours</h3>
-                    <p>Calculate accurate total playtime across all Rust servers, not just individual server hours. Get the complete picture of a player's Rust experience.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">📅</span>
-                    <h3>First Seen Analytics</h3>
-                    <p>Track when players first appeared on Rust servers with detailed timestamps and relative time calculations for better player profiling.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">🏆</span>
-                    <h3>Top Servers Ranking</h3>
-                    <p>View players' most played servers ranked by hours with pagination support for comprehensive server history analysis.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">🔄</span>
-                    <h3>Auto-Pull Data</h3>
-                    <p>Automatically load player analytics when visiting profile pages. No manual clicking required - data appears instantly.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">🚨</span>
-                    <h3>Real-Time Player Alerts</h3>
-                    <p>Get instant notifications when specific players join or leave servers. Perfect for server administrators and competitive players.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">📈</span>
-                    <h3>Population Monitoring</h3>
-                    <p>Track server population changes with historical data, trends, and predictions. Monitor server health and peak times.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">🔍</span>
-                    <h3>Advanced Player Search</h3>
-                    <p>Search through player databases with real-time filtering. Find players quickly across your monitored servers.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">📝</span>
-                    <h3>Activity Logging</h3>
-                    <p>Comprehensive activity logs with timestamps, player actions, and detailed event tracking for server administration.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">🔧</span>
-                    <h3>Debug Console</h3>
-                    <p>Advanced debugging tools with detailed logging, export functionality, and troubleshooting capabilities for power users.</p>
-                </div>
-            </div>
+    <!-- Footer -->
+    <footer class="border-t border-zinc-900 pt-12 pb-8 px-6 text-center">
+        <div class="flex justify-center gap-6 mb-8 text-zinc-500">
+            <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" class="hover:text-white transition"><i class="fab fa-github text-2xl"></i></a>
+            <a href="#" class="hover:text-white transition"><i class="fab fa-discord text-2xl"></i></a>
         </div>
-    </section>
-
-    <section id="installation" class="section installation">
-        <div class="container">
-            <h2 class="section-title">Easy Installation</h2>
-            <div class="installation-steps">
-                <div class="step">
-                    <div class="step-number">1</div>
-                    <h3>Install Tampermonkey</h3>
-                    <p>Download and install the Tampermonkey browser extension from the official website.</p>
-                </div>
-                <div class="step">
-                    <div class="step-number">2</div>
-                    <h3>Download Scripts</h3>
-                    <p>Click the download links below to automatically install the userscripts through Tampermonkey.</p>
-                </div>
-                <div class="step">
-                    <div class="step-number">3</div>
-                    <h3>Visit BattleMetrics</h3>
-                    <p>Navigate to any BattleMetrics player or server page to see the enhanced analytics in action.</p>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <section id="download" class="section section-gray">
-        <div class="container">
-            <h2 class="section-title">Download Scripts</h2>
-            <div class="download-cards">
-                <div class="download-card">
-                    <h3>Player Analytics Script</h3>
-                    <p>Comprehensive player statistics and analytics for BattleMetrics player profiles.</p>
-                    <ul class="feature-list">
-                        <li>True total Rust hours calculation</li>
-                        <li>First seen date tracking</li>
-                        <li>Top servers by playtime</li>
-                        <li>Auto-pull functionality</li>
-                        <li>Daily average calculations</li>
-                        <li>Collapsible interface sections</li>
-                        <li>Copy player information</li>
-                        <li>Debug console with logging</li>
-                    </ul>
-                    <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics/raw/refs/heads/main/BMplayer.user.js" class="btn btn-primary download-btn">Install Player Script</a>
-                </div>
-                <div class="download-card">
-                    <h3>Server Monitor Script</h3>
-                    <p>Advanced server monitoring with real-time alerts and population tracking.</p>
-                    <ul class="feature-list">
-                        <li>Real-time player join/leave alerts</li>
-                        <li>Population monitoring & predictions</li>
-                        <li>Player database with search</li>
-                        <li>Activity logging system</li>
-                        <li>Sound notifications</li>
-                        <li>Saved players management</li>
-                        <li>Alert acknowledgment system</li>
-                        <li>Historical population data</li>
-                    </ul>
-                    <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics/raw/refs/heads/main/BMserver.user.js" class="btn btn-primary download-btn">Install Server Script</a>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <section class="section section-white">
-        <div class="container">
-            <h2 class="section-title">Technical Specifications</h2>
-            <div class="features-grid">
-                <div class="feature-card">
-                    <span class="feature-icon">⚡</span>
-                    <h3>Performance Optimized</h3>
-                    <p>Efficient data processing with minimal impact on BattleMetrics performance. Smart caching and debounced operations.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">💾</span>
-                    <h3>Local Data Storage</h3>
-                    <p>All data stored locally in your browser. No external servers, complete privacy, and offline functionality.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">🔒</span>
-                    <h3>Privacy Focused</h3>
-                    <p>No data collection, no tracking, no external requests. Your analytics data stays completely private.</p>
-                </div>
-                <div class="feature-card">
-                    <span class="feature-icon">🔄</span>
-                    <h3>Auto-Updates</h3>
-                    <p>Tampermonkey automatically checks for script updates, ensuring you always have the latest features and fixes.</p>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <footer>
-        <div class="container">
-            <p>&copy; 2024 BattleMetrics Rust Analytics. Open source userscripts for enhanced BattleMetrics experience.</p>
-            <p>Not affiliated with BattleMetrics. Scripts provided as-is for educational and analytical purposes.</p>
-            <div style="margin-top: 1rem; display: flex; justify-content: center; gap: 2rem; flex-wrap: wrap;">
-                <a href="https://github.com/jlaiii/BattleMetrics-Rust-Analytics" target="_blank" style="color: #fff; text-decoration: none; font-weight: bold; transition: opacity 0.3s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
-                    📁 View on GitHub
-                </a>
-                <a href="https://discord.gg/bEPn9UH9Xw" target="_blank" style="color: #fff; text-decoration: none; font-weight: bold; transition: opacity 0.3s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'">
-                    💬 Join Discord
-                </a>
-            </div>
-        </div>
+        <p class="text-zinc-600 text-xs">
+            © 2024 BMOversight Project. Not affiliated with BattleMetrics LLC or Facepunch Studios.
+        </p>
     </footer>
 
     <script>
-        // Smooth scrolling for navigation links
-        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-            anchor.addEventListener('click', function (e) {
-                e.preventDefault();
-                const target = document.querySelector(this.getAttribute('href'));
-                if (target) {
-                    target.scrollIntoView({
-                        behavior: 'smooth',
-                        block: 'start'
-                    });
-                }
-            });
-        });
+        const modal = document.getElementById('downloadModal');
+        const step1 = document.getElementById('modalStep1');
+        const step2 = document.getElementById('modalStep2');
 
-        // Global variable to store the current download URL
-        let currentDownloadUrl = '';
-
-        // Show Tampermonkey modal when download buttons are clicked
-        document.querySelectorAll('.download-btn').forEach(link => {
-            link.addEventListener('click', function(e) {
-                e.preventDefault();
-                currentDownloadUrl = this.href;
-                showTampermonkeyModal();
-            });
-        });
-
-        function showTampermonkeyModal() {
-            const modal = document.getElementById('tampermonkey-modal');
-            modal.style.display = 'flex';
-            document.body.style.overflow = 'hidden';
+        function openDownloadModal() {
+            modal.classList.remove('hidden');
+            step1.classList.remove('hidden');
+            step2.classList.add('hidden');
         }
 
-        function closeTampermonkeyModal() {
-            const modal = document.getElementById('tampermonkey-modal');
-            modal.style.display = 'none';
-            document.body.style.overflow = 'auto';
+        function closeDownloadModal() {
+            modal.classList.add('hidden');
         }
 
-        function proceedToDownload() {
-            closeTampermonkeyModal();
-            // Open the script URL directly
-            window.open(currentDownloadUrl, '_blank');
+        function showStep2() {
+            step1.classList.add('hidden');
+            step2.classList.remove('hidden');
         }
 
-        function installTampermonkey() {
-            closeTampermonkeyModal();
-            // Open Tampermonkey website
-            window.open('https://www.tampermonkey.net/', '_blank');
-        }
-
-        // Close modal when clicking outside
-        document.getElementById('tampermonkey-modal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeTampermonkeyModal();
+        // Close on outside click
+        window.onclick = function(event) {
+            if (event.target == modal) {
+                closeDownloadModal();
             }
-        });
-
-        // Close modal with Escape key
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') {
-                closeTampermonkeyModal();
-            }
-        });
+        }
     </script>
 </body>
 </html>
