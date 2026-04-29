@@ -1,15 +1,19 @@
 ﻿// ==UserScript==
 // @name         BM Oversight
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.0
 // @description  Combined BattleMetrics toolkit: real-time server monitoring with player alerts & activity logging, plus Rust player analytics (playtime, top servers, first seen)
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/*
 // @match        https://battlemetrics.com/*
+// @match        *://www.battlemetrics.com/*
+// @match        *://battlemetrics.com/*
+// @match        *://*.battlemetrics.com/*
+// @include      /^https?:\/\/([^\/]+\.)?battlemetrics\.com\/.*/
 // @updateURL    https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js
 // @downloadURL  https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js
-// @grant        none
-// @run-at       document-idle
+// @run-at       document-start
+// @grant        GM_addStyle
 // ==/UserScript==
 
 // ============================================================
@@ -21,9 +25,12 @@
     'use strict';
 
     // Constants - make them tab-specific to prevent cross-tab interference
-    const SERVER_MONITOR_ID = `bms-server-monitor-${Math.random().toString(36).substr(2, 9)}`;
-    const TOGGLE_BUTTON_ID = `bms-toggle-button-${Math.random().toString(36).substr(2, 9)}`;
-    const ALERT_PANEL_ID = `bms-alert-panel-${Math.random().toString(36).substr(2, 9)}`;
+    const STABLE_SERVER_MONITOR_ID = 'bms-server-monitor';
+    const STABLE_TOGGLE_BUTTON_ID = 'bms-toggle-button';
+    const STABLE_ALERT_PANEL_ID = 'bms-alert-panel';
+    const SERVER_MONITOR_ID = STABLE_SERVER_MONITOR_ID;
+    const TOGGLE_BUTTON_ID = STABLE_TOGGLE_BUTTON_ID;
+    const ALERT_PANEL_ID = STABLE_ALERT_PANEL_ID;
     const MENU_VISIBLE_KEY = 'bms_menu_visible';
     
     // Server-specific storage keys (will be set after server ID is determined)
@@ -55,7 +62,7 @@
     };
 
     // Update/check settings (global)
-    const SCRIPT_VERSION = '1.0.1';
+    const SCRIPT_VERSION = '1.0.0';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
     const CHANGELOG_URL  = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/changes.json';
@@ -400,6 +407,10 @@ User Agent: ${navigator.userAgent}
         userAgent: navigator.userAgent,
         timestamp: new Date().toISOString()
     });
+    try {
+        document.documentElement.setAttribute('data-bms-oversight-loaded', SCRIPT_VERSION);
+        console.log(`[BM Oversight] userscript booted v${SCRIPT_VERSION} on ${window.location.href}`);
+    } catch (_) { /* non-fatal boot marker */ }
     
     // Debug console system initialized
     debugConsole.debug('Debug console system initialized');
@@ -474,6 +485,144 @@ User Agent: ${navigator.userAgent}
         localStorage.setItem(MENU_VISIBLE_KEY, visible.toString());
         updateUIVisibility();
     };
+
+    const appendToPage = (element) => {
+        const parent = document.body || document.documentElement;
+        if (parent && element && element.parentNode !== parent) parent.appendChild(element);
+    };
+
+    const createEmergencyToggleButton = () => {
+        if (!window.location.href.includes('/servers/')) return;
+        if (document.getElementById(TOGGLE_BUTTON_ID)) return;
+        let btn = document.getElementById('bms-emergency-toggle');
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.id = 'bms-emergency-toggle';
+            btn.type = 'button';
+            btn.textContent = 'BM';
+            btn.title = 'Open BM Oversight';
+            btn.addEventListener('click', () => {
+                try {
+                    if (!serverMonitor) initialize();
+                    setMenuVisibility(true);
+                    createToggleButton();
+                    createServerMonitor();
+                } catch (e) {
+                    console.error('[BM Oversight] Emergency toggle failed', e);
+                }
+            });
+            Object.assign(btn.style, {
+                position: 'fixed',
+                top: '20px',
+                right: '20px',
+                zIndex: '2147483647',
+                background: '#dc3545',
+                color: '#fff',
+                border: '2px solid #fff',
+                borderRadius: '6px',
+                padding: '9px 12px',
+                fontSize: '13px',
+                fontWeight: '800',
+                cursor: 'pointer',
+                display: 'block',
+                visibility: 'visible',
+                opacity: '1',
+                pointerEvents: 'auto'
+            });
+            btn.style.setProperty('position', 'fixed', 'important');
+            btn.style.setProperty('z-index', '2147483647', 'important');
+            btn.style.setProperty('display', 'block', 'important');
+            btn.style.setProperty('visibility', 'visible', 'important');
+            appendToPage(btn);
+        }
+    };
+
+    const parseInlineArgs = (argsText, element) => {
+        if (!argsText || !argsText.trim()) return [];
+        const args = [];
+        const re = /'((?:\\'|[^'])*)'|"((?:\\"|[^"])*)"|this\.value|this\.checked|this|true|false|null|undefined|-?\d+(?:\.\d+)?/g;
+        let match;
+        while ((match = re.exec(argsText))) {
+            const token = match[0];
+            if (token === 'this') args.push(element);
+            else if (token === 'this.value') args.push(element.value);
+            else if (token === 'this.checked') args.push(!!element.checked);
+            else if (token === 'true') args.push(true);
+            else if (token === 'false') args.push(false);
+            else if (token === 'null') args.push(null);
+            else if (token === 'undefined') args.push(undefined);
+            else if (match[1] !== undefined) args.push(match[1].replace(/\\'/g, "'").replace(/&#39;/g, "'").replace(/&#92;/g, '\\'));
+            else if (match[2] !== undefined) args.push(match[2].replace(/\\"/g, '"').replace(/&#39;/g, "'").replace(/&#92;/g, '\\'));
+            else args.push(Number(token));
+        }
+        return args;
+    };
+
+    const handleBmsInlineAction = (element, attrName) => {
+        const host = element.closest(`#${SERVER_MONITOR_ID}, #${ALERT_PANEL_ID}, #bms-name-history-modal, #bms-alts-modal, #bms-donate-modal, #bms-welcome-modal, #bms-update-popup-modal`);
+        if (!host) return false;
+        const code = element.getAttribute(attrName);
+        if (!code) return false;
+
+        try {
+            const openMatch = code.match(/window\.open\(['"]([^'"]+)['"](?:,\s*['"]([^'"]+)['"])?\)/);
+            if (openMatch) {
+                window.open(openMatch[1], openMatch[2] || '_blank');
+                return true;
+            }
+
+            const removeMatch = code.match(/document\.getElementById\(['"]([^'"]+)['"]\)\??\.remove\(\)/);
+            if (removeMatch && !/[A-Za-z0-9_]+\(/.test(code.replace(removeMatch[0], ''))) {
+                document.getElementById(removeMatch[1])?.remove();
+                return true;
+            }
+
+            let handled = false;
+            const callRe = /(?:window\.)?([A-Za-z_$][\w$]*)\(([^()]*)\)/g;
+            let match;
+            while ((match = callRe.exec(code))) {
+                const fnName = match[1];
+                if (fnName === 'open' || fnName === 'getElementById') continue;
+                const fn = window[fnName];
+                if (typeof fn === 'function') {
+                    fn(...parseInlineArgs(match[2], element));
+                    handled = true;
+                }
+            }
+
+            if (removeMatch) {
+                document.getElementById(removeMatch[1])?.remove();
+                handled = true;
+            }
+
+            return handled;
+        } catch (e) {
+            console.error('[BM Oversight] Inline action bridge failed', e, code);
+            return false;
+        }
+    };
+
+    document.addEventListener('click', (event) => {
+        const el = event.target && event.target.closest ? event.target.closest('[onclick]') : null;
+        if (el && handleBmsInlineAction(el, 'onclick')) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+    }, true);
+
+    document.addEventListener('input', (event) => {
+        const el = event.target;
+        if (el && el.getAttribute && el.hasAttribute('oninput')) {
+            handleBmsInlineAction(el, 'oninput');
+        }
+    }, true);
+
+    document.addEventListener('change', (event) => {
+        const el = event.target;
+        if (el && el.getAttribute && el.hasAttribute('onchange')) {
+            handleBmsInlineAction(el, 'onchange');
+        }
+    }, true);
 
     const updateUIVisibility = () => {
         const monitor = document.getElementById(SERVER_MONITOR_ID);
@@ -2603,9 +2752,16 @@ User Agent: ${navigator.userAgent}
     const createToggleButton = () => {
         const existingToggleBtn = document.getElementById(TOGGLE_BUTTON_ID);
         if (existingToggleBtn) existingToggleBtn.remove();
+        const existingStableToggleBtn = document.getElementById(STABLE_TOGGLE_BUTTON_ID);
+        if (existingStableToggleBtn) existingStableToggleBtn.remove();
+        const emergencyToggleBtn = document.getElementById('bms-emergency-toggle');
+        if (emergencyToggleBtn) emergencyToggleBtn.remove();
 
         const toggleBtn = document.createElement("button");
         toggleBtn.id = TOGGLE_BUTTON_ID;
+        toggleBtn.setAttribute('data-bms-stable-id', STABLE_TOGGLE_BUTTON_ID);
+        toggleBtn.setAttribute('aria-label', 'Toggle BM Oversight');
+        toggleBtn.type = 'button';
         toggleBtn.onclick = () => {
             const currentlyVisible = isMenuVisible();
             setMenuVisibility(!currentlyVisible);
@@ -2615,7 +2771,7 @@ User Agent: ${navigator.userAgent}
             position: "fixed",
             top: "20px",
             right: "20px",
-            zIndex: "10000",
+            zIndex: "2147483647",
             padding: "8px 12px",
             backgroundColor: "#6c757d",
             color: "#fff",
@@ -2623,10 +2779,19 @@ User Agent: ${navigator.userAgent}
             borderRadius: "5px",
             cursor: "pointer",
             fontSize: "14px",
-            fontWeight: "bold"
+            fontWeight: "bold",
+            display: "block",
+            visibility: "visible",
+            opacity: "1",
+            pointerEvents: "auto"
         });
+        toggleBtn.style.setProperty('position', 'fixed', 'important');
+        toggleBtn.style.setProperty('z-index', '2147483647', 'important');
+        toggleBtn.style.setProperty('display', 'block', 'important');
+        toggleBtn.style.setProperty('visibility', 'visible', 'important');
+        toggleBtn.style.setProperty('opacity', '1', 'important');
 
-        document.body.appendChild(toggleBtn);
+        appendToPage(toggleBtn);
         updateToggleButton();
     };
 
@@ -2634,9 +2799,12 @@ User Agent: ${navigator.userAgent}
     const createServerMonitor = () => {
         const existingMonitor = document.getElementById(SERVER_MONITOR_ID);
         if (existingMonitor) existingMonitor.remove();
+        const existingStableMonitor = document.getElementById(STABLE_SERVER_MONITOR_ID);
+        if (existingStableMonitor) existingStableMonitor.remove();
 
         const monitor = document.createElement('div');
         monitor.id = SERVER_MONITOR_ID;
+        monitor.setAttribute('data-bms-stable-id', STABLE_SERVER_MONITOR_ID);
         
         Object.assign(monitor.style, {
             position: "fixed",
@@ -2646,7 +2814,7 @@ User Agent: ${navigator.userAgent}
             color: "#fff",
             padding: "20px",
             borderRadius: "10px",
-            zIndex: "9999",
+            zIndex: "2147483646",
             fontSize: "14px",
             maxWidth: "450px",
             maxHeight: "80vh",
@@ -2655,6 +2823,10 @@ User Agent: ${navigator.userAgent}
             border: "1px solid #34495e",
             lineHeight: "1.4"
         });
+        monitor.style.setProperty('position', 'fixed', 'important');
+        monitor.style.setProperty('z-index', '2147483646', 'important');
+        monitor.style.setProperty('visibility', 'visible', 'important');
+        monitor.style.setProperty('opacity', '1', 'important');
 
         monitor.innerHTML = `
             <div style="border-bottom: 2px solid rgba(255,255,255,0.2); padding-bottom: 12px; margin-bottom: 15px;">
@@ -3060,7 +3232,7 @@ User Agent: ${navigator.userAgent}
             </div>
         `;
 
-        document.body.appendChild(monitor);
+        appendToPage(monitor);
         updateUIVisibility();
         
         // Initialize debug console display
@@ -6311,8 +6483,10 @@ User Agent: ${navigator.userAgent}
 
     // Wait for page to load and initialize with better timing
     const initializeWhenReady = () => {
+        createEmergencyToggleButton();
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
+                createEmergencyToggleButton();
                 setTimeout(initialize, 1000);
             });
         } else {
@@ -6330,6 +6504,7 @@ User Agent: ${navigator.userAgent}
     
     // Also set up a fallback initialization check
     setTimeout(() => {
+        createEmergencyToggleButton();
         if (!document.getElementById(TOGGLE_BUTTON_ID) && /\/servers\/[^\/]+\/\d+/.test(window.location.pathname)) {
             console.log('BattleMetrics Monitor - Fallback initialization triggered');
             initialize();
@@ -6461,6 +6636,7 @@ User Agent: ${navigator.userAgent}
             }
             return;
         }
+        createEmergencyToggleButton();
         
         // Extract server ID from URL (match any game slug, not just 'rust')
         const serverMatch = currentURL.match(/\/servers\/[^\/]+\/(\d+)/);
@@ -6482,6 +6658,18 @@ User Agent: ${navigator.userAgent}
                 initialize();
             }, 500);
         } else {
+            const toggleBtn = document.getElementById(TOGGLE_BUTTON_ID);
+            const monitor = document.getElementById(SERVER_MONITOR_ID);
+            if (serverMonitor && (!toggleBtn || !monitor)) {
+                debugConsole.warn('BM Oversight UI missing on initialized server; recreating');
+                createToggleButton();
+                createServerMonitor();
+            } else if (toggleBtn) {
+                toggleBtn.style.setProperty('display', 'block', 'important');
+                toggleBtn.style.setProperty('visibility', 'visible', 'important');
+                toggleBtn.style.setProperty('opacity', '1', 'important');
+                toggleBtn.style.setProperty('z-index', '2147483647', 'important');
+            }
             // Same server — just keep lastURL in sync (covers hash/query changes)
             lastURL = currentURL;
         }
@@ -6510,7 +6698,7 @@ User Agent: ${navigator.userAgent}
     'use strict';
 
     // Script version constant used for update checks and displays
-    const SCRIPT_VERSION = '1.0.1';
+    const SCRIPT_VERSION = '1.0.0';
     // GitHub raw URL for the userscript (Tampermonkey will detect and offer install)
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
