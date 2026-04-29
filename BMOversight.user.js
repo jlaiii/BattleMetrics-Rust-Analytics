@@ -1,10 +1,11 @@
 ﻿// ==UserScript==
 // @name         BM Oversight
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.0.1
 // @description  Combined BattleMetrics toolkit: real-time server monitoring with player alerts & activity logging, plus Rust player analytics (playtime, top servers, first seen)
 // @author       jlaiii
 // @match        https://www.battlemetrics.com/*
+// @match        https://battlemetrics.com/*
 // @updateURL    https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js
 // @downloadURL  https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js
 // @grant        none
@@ -54,7 +55,7 @@
     };
 
     // Update/check settings (global)
-    const SCRIPT_VERSION = '1.0.0';
+    const SCRIPT_VERSION = '1.0.1';
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
     const CHANGELOG_URL  = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/changes.json';
@@ -6509,7 +6510,7 @@ User Agent: ${navigator.userAgent}
     'use strict';
 
     // Script version constant used for update checks and displays
-    const SCRIPT_VERSION = '1.0.0';
+    const SCRIPT_VERSION = '1.0.1';
     // GitHub raw URL for the userscript (Tampermonkey will detect and offer install)
     const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/jlaiii/BattleMetrics-Rust-Analytics/main/BMOversight.user.js';
     const INSTALL_URL = 'https://jlaiii.github.io/BattleMetrics-Rust-Analytics/';
