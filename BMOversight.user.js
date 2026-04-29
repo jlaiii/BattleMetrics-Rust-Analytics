@@ -406,6 +406,7 @@ User Agent: ${navigator.userAgent}
     // Global variables - each tab will have its own instance
     let currentServerID = null;
     let serverMonitor = null;
+    let isInitializing = false; // guard against concurrent initialize() calls
     let monitoringInterval = null;
     let lastPlayerList = new Map();
     let currentServerName = '';
@@ -523,6 +524,12 @@ User Agent: ${navigator.userAgent}
         return Math.round(((hours * 60 + minutes) * 60 + seconds) * 1000);
     };
 
+    const formatSessionDuration = (ms) => {
+        if (typeof ms !== 'number' || ms < 0) return '';
+        if (ms >= 3600000) return `${(ms / 3600000).toFixed(1)}h`;
+        return `${Math.max(1, Math.round(ms / 60000))}m`;
+    };
+
     // Server Monitor Class
     class ServerMonitor {
         constructor() {
@@ -549,8 +556,96 @@ User Agent: ${navigator.userAgent}
             }
         }
 
+        // Free up localStorage space by pruning the largest/oldest data.
+        // Returns approximate bytes freed.
+        freeStorageSpace() {
+            let freed = 0;
+            try {
+                // 1. Activity log — keep only the most recent 1000 entries
+                if (this.activityLog && this.activityLog.length > 1000) {
+                    const before = JSON.stringify(this.activityLog).length;
+                    this.activityLog = this.activityLog.slice(-1000);
+                    const pruned = JSON.stringify(this.activityLog);
+                    localStorage.removeItem(ACTIVITY_LOG_KEY);
+                    localStorage.setItem(ACTIVITY_LOG_KEY, pruned);
+                    freed += before - pruned.length;
+                }
+            } catch (e) { /* ignore */ }
+            try {
+                // 2. Population history — trim to last 6 hours instead of 24
+                if (this.populationHistory && this.populationHistory.length > 0) {
+                    const sixHoursAgo = Date.now() - (6 * 60 * 60 * 1000);
+                    const before = JSON.stringify(this.populationHistory).length;
+                    this.populationHistory = this.populationHistory.filter(e => e.timestamp > sixHoursAgo);
+                    const pruned = JSON.stringify(this.populationHistory);
+                    localStorage.removeItem(POPULATION_HISTORY_KEY);
+                    localStorage.setItem(POPULATION_HISTORY_KEY, pruned);
+                    freed += before - pruned.length;
+                }
+            } catch (e) { /* ignore */ }
+            try {
+                // 3. Recent alerts — drop anything acknowledged or older than 6 hours
+                const sixHoursAgo = Date.now() - (6 * 60 * 60 * 1000);
+                Object.keys(this.recentAlerts || {}).forEach(id => {
+                    const a = this.recentAlerts[id];
+                    if (a.acknowledged || a.timestamp < sixHoursAgo) {
+                        delete this.recentAlerts[id];
+                    }
+                });
+                const pruned = JSON.stringify(this.recentAlerts);
+                localStorage.removeItem(RECENT_ALERTS_KEY);
+                localStorage.setItem(RECENT_ALERTS_KEY, pruned);
+            } catch (e) { /* ignore */ }
+            try {
+                // 4. Player database — NEVER drop players, but slim previousNames to last 5 per player
+                //    This keeps the full roster intact while reclaiming space from long name histories.
+                if (this.playerDatabase) {
+                    const before = JSON.stringify(this.playerDatabase).length;
+                    Object.keys(this.playerDatabase).forEach(pid => {
+                        const p = this.playerDatabase[pid];
+                        if (p.previousNames && p.previousNames.length > 5) {
+                            p.previousNames = p.previousNames.slice(-5);
+                        }
+                    });
+                    const pruned = JSON.stringify(this.playerDatabase);
+                    localStorage.removeItem(PLAYER_DATABASE_KEY);
+                    localStorage.setItem(PLAYER_DATABASE_KEY, pruned);
+                    freed += before - pruned.length;
+                }
+            } catch (e) { /* ignore */ }
+            console.warn('[BM Oversight] Freed ~' + Math.round(freed / 1024) + ' KB of localStorage space');
+            return freed;
+        }
+
+        // Internal helper: try setItem, if quota exceeded free space and retry once.
+        _setItemWithRetry(key, value) {
+            try {
+                localStorage.setItem(key, value);
+            } catch (e) {
+                if (e.name === 'QuotaExceededError' || e.code === 22 || (e.message && e.message.toLowerCase().includes('quota'))) {
+                    console.warn('[BM Oversight] QuotaExceededError — pruning storage and retrying...');
+                    this.freeStorageSpace();
+                    // Retry after pruning
+                    try {
+                        localStorage.setItem(key, value);
+                    } catch (e2) {
+                        // Still failing — storage is critically full
+                        throw e2;
+                    }
+                } else {
+                    throw e;
+                }
+            }
+        }
+
         saveAlerts() {
-            localStorage.setItem(ALERTS_KEY, JSON.stringify(this.alerts));
+            if (!ALERTS_KEY) throw new Error('Storage key not initialized');
+            try {
+                this._setItemWithRetry(ALERTS_KEY, JSON.stringify(this.alerts));
+            } catch (e) {
+                console.error('[BM Oversight] Failed to save alerts:', e);
+                throw e;
+            }
         }
 
         loadActivityLog() {
@@ -568,7 +663,11 @@ User Agent: ${navigator.userAgent}
             clearTimeout(this._activityLogSaveTimeout);
             this._activityLogSaveTimeout = setTimeout(() => {
                 try {
-                    localStorage.setItem(ACTIVITY_LOG_KEY, JSON.stringify(this.activityLog));
+                    // Hard cap: keep most recent 2000 entries to prevent quota issues
+                    if (this.activityLog.length > 2000) {
+                        this.activityLog = this.activityLog.slice(-2000);
+                    }
+                    this._setItemWithRetry(ACTIVITY_LOG_KEY, JSON.stringify(this.activityLog));
                 } catch (e) {
                     console.error('Failed to save activity log to localStorage:', e);
                 }
@@ -596,20 +695,44 @@ User Agent: ${navigator.userAgent}
         }
 
         saveSavedPlayers() {
-            localStorage.setItem(SAVED_PLAYERS_KEY, JSON.stringify(this.savedPlayers));
+            if (!SAVED_PLAYERS_KEY) throw new Error('Storage key not initialized');
+            try {
+                this._setItemWithRetry(SAVED_PLAYERS_KEY, JSON.stringify(this.savedPlayers));
+            } catch (e) {
+                console.error('[BM Oversight] Failed to save players:', e);
+                throw e;
+            }
         }
 
         savePlayer(playerName, playerId) {
+            const previous = this.savedPlayers[playerId];
             this.savedPlayers[playerId] = {
                 name: playerName,
                 saved: Date.now()
             };
-            this.saveSavedPlayers();
+            try {
+                this.saveSavedPlayers();
+            } catch (e) {
+                // Roll back so in-memory state stays consistent with storage
+                if (previous) {
+                    this.savedPlayers[playerId] = previous;
+                } else {
+                    delete this.savedPlayers[playerId];
+                }
+                throw e;
+            }
         }
 
         removeSavedPlayer(playerId) {
+            const previous = this.savedPlayers[playerId];
             delete this.savedPlayers[playerId];
-            this.saveSavedPlayers();
+            try {
+                this.saveSavedPlayers();
+            } catch (e) {
+                // Roll back
+                if (previous) this.savedPlayers[playerId] = previous;
+                throw e;
+            }
         }
 
         loadRecentAlerts() {
@@ -729,7 +852,9 @@ User Agent: ${navigator.userAgent}
             clearTimeout(this.databaseSaveTimeout);
             this.databaseSaveTimeout = setTimeout(() => {
                 try {
-                    localStorage.setItem(PLAYER_DATABASE_KEY, JSON.stringify(this.playerDatabase));
+                    // Never drop player records — full history is the whole point of this DB.
+                    // Use _setItemWithRetry so if storage is full, other data is pruned first.
+                    this._setItemWithRetry(PLAYER_DATABASE_KEY, JSON.stringify(this.playerDatabase));
                 } catch (e) {
                     console.error('Failed to save player database:', e);
                 }
@@ -1270,6 +1395,11 @@ User Agent: ${navigator.userAgent}
                 const hasAlert = this.alerts[player.id];
                 const isSaved = this.savedPlayers[player.id];
                 const isOnline = this.currentPlayers.has(player.id);
+                const currentPlayer = this.currentPlayers.get(player.id);
+                const sessionText = isOnline && currentPlayer ? formatSessionDuration(currentPlayer.sessionMs) : '';
+                const sessionLine = sessionText
+                    ? `<div style="color: #6c757d; font-size: 10px; margin-top: 2px;">Session: ${sessionText}</div>`
+                    : '';
                 const note = this.playerNotes && this.playerNotes[player.id];
                 const hasNote = note && note.text;
                 const tags = this.getPlayerTags(player.id);
@@ -1298,6 +1428,7 @@ User Agent: ${navigator.userAgent}
                             <div style="opacity: 0.7; font-size: 10px;">
                                 ID: ${player.id} | Last seen: ${lastSeenTime} | Detections: ${player.seenCount || 1}×
                             </div>
+                            ${sessionLine}
                             ${player.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
                             ${hasNote ? `<div style="color: #17a2b8; font-size: 10px; margin-top: 2px; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px;">📝 ${note.text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>` : ''}
                         </div>
@@ -1307,12 +1438,12 @@ User Agent: ${navigator.userAgent}
                                     title="View Profile">
                                 Profile
                             </button>
-                            <button onclick="togglePlayerAlert('${player.currentName}', '${player.id}')" 
+                            <button onclick="togglePlayerAlert('${player.currentName.replace(/'/g,"&#39;").replace(/\\/g,"&#92;")}', '${player.id}')" 
                                     style="background: ${hasAlert ? '#dc3545' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                     title="${hasAlert ? 'Remove Alert' : 'Add Alert'}">
                                 ${hasAlert ? 'Remove' : 'Add Alert'}
                             </button>
-                            <button onclick="savePlayer('${player.currentName}', '${player.id}')" 
+                            <button onclick="savePlayer('${player.currentName.replace(/'/g,"&#39;").replace(/\\/g,"&#92;")}', '${player.id}')" 
                                     style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                     title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
                                 ${isSaved ? 'Saved' : 'Save'}
@@ -1402,7 +1533,10 @@ User Agent: ${navigator.userAgent}
                 this.updateAlertCount();
                 this.expandAlertSection();
             } catch (error) {
-                if (debugConsole && debugConsole.enabled) debugConsole.error('[Alert System] Error in addAlert', error);
+                // Roll back the in-memory change so UI stays consistent with storage
+                delete this.alerts[playerId];
+                if (debugConsole) debugConsole.error('[Alert System] Error in addAlert', error);
+                alert('Failed to save alert: ' + error.message);
             }
         }
 
@@ -1999,19 +2133,13 @@ User Agent: ${navigator.userAgent}
                 try {
                     if (player && typeof player.sessionMs === 'number' && player.sessionMs !== null) {
                         const ms = player.sessionMs;
-                        let sessionText = '';
-                        if (ms >= 3600000) {
-                            const hrs = ms / 3600000;
-                            sessionText = `${hrs.toFixed(1)}h`;
-                        } else {
-                            const mins = Math.round(ms / 60000);
-                            sessionText = `${mins}m`;
+                        const sessionText = formatSessionDuration(ms);
+                        if (sessionText) {
+                            const sessionSpan = document.createElement('div');
+                            sessionSpan.style.cssText = 'color: #6c757d; font-size: 11px; margin-top: 3px;';
+                            sessionSpan.textContent = `Session: ${sessionText}`;
+                            playerInfo.appendChild(sessionSpan);
                         }
-
-                        const sessionSpan = document.createElement('div');
-                        sessionSpan.style.cssText = 'color: #6c757d; font-size: 11px; margin-top: 3px;';
-                        sessionSpan.textContent = `Session: ${sessionText}`;
-                        playerInfo.appendChild(sessionSpan);
                     }
                 } catch (e) {
                     // Ignore non-critical display errors
@@ -2103,6 +2231,8 @@ User Agent: ${navigator.userAgent}
                     const addedDate = new Date(alert.added).toLocaleDateString();
                     const isOnline = this.currentPlayers.has(playerId);
                     const dbPlayer = this.playerDatabase[playerId];
+                    const currentPlayer = this.currentPlayers.get(playerId);
+                    const sessionText = isOnline && currentPlayer ? formatSessionDuration(currentPlayer.sessionMs) : '';
                     const isSaved = this.savedPlayers[playerId];
                     
                     // Get current name and check for name changes
@@ -2126,6 +2256,9 @@ User Agent: ${navigator.userAgent}
                     const lastSeenLine = (!isOnline && dbPlayer && dbPlayer.lastSeen)
                         ? `<div style="opacity: 0.7; font-size: 10px; margin-top: 1px;">Last seen: ${toRelativeTime(dbPlayer.lastSeen)}</div>`
                         : '';
+                    const sessionLine = sessionText
+                        ? `<div style="color: #6c757d; font-size: 10px; margin-top: 1px;">Session: ${sessionText}</div>`
+                        : '';
 
                     alertHTML += `
                         <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(255, 193, 7, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#ffc107'};">
@@ -2140,6 +2273,7 @@ User Agent: ${navigator.userAgent}
                                 <div style="opacity: 0.7; font-size: 10px;">
                                     Added: ${addedDate} | ID: ${playerId}
                                 </div>
+                                ${sessionLine}
                                 ${lastSeenLine}
                                 ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
                             </div>
@@ -2149,7 +2283,7 @@ User Agent: ${navigator.userAgent}
                                         title="View Profile">
                                     Profile
                                 </button>
-                                <button onclick="savePlayer('${displayName}', '${playerId}')" 
+                                <button onclick="savePlayer('${displayName.replace(/'/g,"&#39;").replace(/\\/g,"&#92;")}', '${playerId}')" 
                                         style="background: ${isSaved ? '#6c757d' : '#28a745'}; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                         title="${isSaved ? 'Already Saved' : 'Save Player'}" ${isSaved ? 'disabled' : ''}>
                                     ${isSaved ? 'Saved' : 'Save'}
@@ -2159,7 +2293,7 @@ User Agent: ${navigator.userAgent}
                                         title="View history">
                                     History
                                 </button>
-                                <button onclick="confirmRemoveAlert('${displayName}', '${playerId}', this)" 
+                                <button onclick="confirmRemoveAlert('${displayName.replace(/'/g,"&#39;").replace(/\\/g,"&#92;")}', '${playerId}', this)" 
                                         style="background: #dc3545; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
                                         title="Remove Alert (click twice to confirm)">
                                     Remove Alert
@@ -2193,6 +2327,8 @@ User Agent: ${navigator.userAgent}
                 const hasAlert = this.alerts[playerId];
                 const isOnline = this.currentPlayers.has(playerId);
                 const dbPlayer = this.playerDatabase[playerId];
+                const currentPlayer = this.currentPlayers.get(playerId);
+                const sessionText = isOnline && currentPlayer ? formatSessionDuration(currentPlayer.sessionMs) : '';
                 
                 // Get current name and check for name changes
                 let displayName = saved.name;
@@ -2215,6 +2351,9 @@ User Agent: ${navigator.userAgent}
                 const lastSeenLine = (!isOnline && dbPlayer && dbPlayer.lastSeen)
                     ? `<div style="opacity: 0.7; font-size: 10px; margin-top: 1px;">Last seen: ${toRelativeTime(dbPlayer.lastSeen)}</div>`
                     : '';
+                const sessionLine = sessionText
+                    ? `<div style="color: #6c757d; font-size: 10px; margin-top: 1px;">Session: ${sessionText}</div>`
+                    : '';
 
                 savedHTML += `
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; margin-bottom: 5px; border-radius: 5px; background: rgba(108, 117, 125, 0.1); border-left: 3px solid ${isOnline ? '#28a745' : '#6c757d'};">
@@ -2229,6 +2368,7 @@ User Agent: ${navigator.userAgent}
                             <div style="opacity: 0.7; font-size: 10px;">
                                 Saved: ${savedDate} | ID: ${playerId}
                             </div>
+                            ${sessionLine}
                             ${lastSeenLine}
                             ${dbPlayer && dbPlayer.nameChanged ? '<div style="color: #ffc107; font-size: 10px;">⚠ Name changed</div>' : ''}
                         </div>
@@ -2240,7 +2380,7 @@ User Agent: ${navigator.userAgent}
                             </button>
                             ${hasAlert
                                 ? `<button disabled style="background: #6c757d; color: rgba(255,255,255,0.5); border: none; padding: 2px 5px; border-radius: 3px; font-size: 9px; cursor: default;" title="Alert active — manage in Alert Players tab">Alerted ✓</button>`
-                                : `<button onclick="togglePlayerAlert('${displayName}', '${playerId}')" style="background: #28a745; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;" title="Add Alert">Add Alert</button>`
+                                : `<button onclick="togglePlayerAlert('${displayName.replace(/'/g,"&#39;").replace(/\\/g,"&#92;")}', '${playerId}')" style="background: #28a745; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;" title="Add Alert">Add Alert</button>`
                             }
                             <button onclick="showNameHistory('${playerId}')"
                                     style="background: #6f42c1; color: white; border: none; padding: 2px 5px; border-radius: 3px; cursor: pointer; font-size: 9px;"
@@ -3106,6 +3246,11 @@ User Agent: ${navigator.userAgent}
         allResults.forEach(player => {
             const isAlerted = serverMonitor.alerts[player.id];
             const isSaved = serverMonitor.savedPlayers[player.id];
+            const currentPlayer = serverMonitor.currentPlayers.get(player.id);
+            const sessionText = currentPlayer ? formatSessionDuration(currentPlayer.sessionMs) : '';
+            const sessionLine = sessionText
+                ? `<div style="color: #6c757d; font-size: 9px; margin-top: 1px;">Session: ${sessionText}</div>`
+                : '';
             
             const playerDiv = document.createElement('div');
             playerDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 11px;';
@@ -3123,6 +3268,7 @@ User Agent: ${navigator.userAgent}
                 <div style="color: ${statusColor}; font-size: 9px; margin-top: 1px;">
                     ${statusText} • ID: ${player.id}
                 </div>
+                ${sessionLine}
             `;
             
             const buttonsDiv = document.createElement('div');
@@ -3337,7 +3483,13 @@ User Agent: ${navigator.userAgent}
             
         } catch (error) {
             debugConsole.error('Error in togglePlayerAlert', error);
-            alert('Error toggling alert: ' + error.message);
+            const isQuota = error.name === 'QuotaExceededError' || error.code === 22 ||
+                            (error.message && error.message.toLowerCase().includes('quota'));
+            if (isQuota) {
+                alert('Storage full — old data was pruned automatically. Please try again.');
+            } else {
+                alert('Error toggling alert: ' + error.message);
+            }
         }
     };
 
@@ -4089,7 +4241,11 @@ User Agent: ${navigator.userAgent}
     };
 
     window.savePlayer = (playerName, playerId) => {
-        if (serverMonitor) {
+        if (!serverMonitor) {
+            alert('Server Monitor not initialized. Please refresh the page.');
+            return;
+        }
+        try {
             serverMonitor.savePlayer(playerName, playerId);
             serverMonitor.updateSavedPlayersDisplay();
             
@@ -4103,11 +4259,21 @@ User Agent: ${navigator.userAgent}
             if (searchInput && searchInput.value.length >= 2) {
                 handlePlayerSearch(searchInput.value);
             }
+        } catch (error) {
+            console.error('[BM Oversight] Failed to save player:', error);
+            const isQuota = error.name === 'QuotaExceededError' || error.code === 22 ||
+                            (error.message && error.message.toLowerCase().includes('quota'));
+            if (isQuota) {
+                alert('Storage full — old activity log and player database entries were pruned automatically. Please try saving again.');
+            } else {
+                alert('Failed to save player: ' + error.message);
+            }
         }
     };
 
     window.removeSavedPlayer = (playerId) => {
-        if (serverMonitor) {
+        if (!serverMonitor) return;
+        try {
             serverMonitor.removeSavedPlayer(playerId);
             serverMonitor.updateSavedPlayersDisplay();
             
@@ -4121,6 +4287,9 @@ User Agent: ${navigator.userAgent}
             if (searchInput && searchInput.value.length >= 2) {
                 handlePlayerSearch(searchInput.value);
             }
+        } catch (error) {
+            console.error('[BM Oversight] Failed to remove saved player:', error);
+            alert('Failed to remove player: ' + error.message);
         }
     };
 
@@ -5787,6 +5956,7 @@ User Agent: ${navigator.userAgent}
         // Reset variables
         currentServerID = null;
         serverMonitor = null;
+        // NOTE: isInitializing is NOT reset here — caller is responsible
         lastPlayerList = new Map();
         currentServerName = '';
         activePlayerSearch = '';
@@ -5797,12 +5967,13 @@ User Agent: ${navigator.userAgent}
 
     // Initialize when page loads
     const initialize = () => {
-        debugConsole.info('Starting initialization...');
-        
-        // Always cleanup first to remove any existing UI elements
-        cleanup();
-        
-        // Check if we're on a server page - extract the actual server ID number
+        // Prevent concurrent/re-entrant calls
+        if (isInitializing) {
+            debugConsole.info('Initialization already in progress, skipping');
+            return;
+        }
+
+        // Check URL first — before any cleanup or state mutation
         const serverMatch = window.location.pathname.match(/\/servers\/[^\/]+\/(\d+)/);
         if (!serverMatch) {
             debugConsole.info('Not on a server page, skipping initialization');
@@ -5810,19 +5981,12 @@ User Agent: ${navigator.userAgent}
         }
 
         const newServerID = serverMatch[1];
-        
-        // Debug logging
-        debugConsole.debug('Current URL: ' + window.location.pathname);
-        debugConsole.info('Extracted Server ID: ' + newServerID);
-        
-        // Check if we're already initialized for this server
+
+        // If already fully initialized for this server, just make sure the UI exists
         if (currentServerID === newServerID && serverMonitor) {
-            debugConsole.info('Already initialized for this server, recreating UI...');
-            // Recreate UI elements to ensure they're visible after navigation
+            debugConsole.info('Already initialized for this server, recreating UI if needed...');
             createToggleButton();
             createServerMonitor();
-            
-            // Update displays
             setTimeout(() => {
                 if (serverMonitor) {
                     serverMonitor.updateAlertDisplay();
@@ -5833,7 +5997,15 @@ User Agent: ${navigator.userAgent}
             }, 500);
             return;
         }
-        
+
+        // New server (or first run) — full re-initialization
+        isInitializing = true;
+        debugConsole.info('Starting initialization for server: ' + newServerID);
+
+        // Cleanup existing UI and state
+        cleanup();
+
+        // Set server ID and initialize storage keys for it
         currentServerID = newServerID;
         
         // Initialize server-specific storage keys
@@ -6031,6 +6203,7 @@ User Agent: ${navigator.userAgent}
             
         } catch (error) {
             debugConsole.error('Failed to initialize ServerMonitor', error);
+            isInitializing = false;
             alert('Server Monitor failed to initialize. Please refresh the page.');
             return;
         }
@@ -6132,6 +6305,7 @@ User Agent: ${navigator.userAgent}
         }, 3000);
 
         console.log('BM Oversight initialized for server:', currentServerID);
+        isInitializing = false;
     };
 
     // Wait for page to load and initialize with better timing
@@ -6295,8 +6469,10 @@ User Agent: ${navigator.userAgent}
         
         const serverID = serverMatch[1];
         
-        // Check if this is a new server or URL changed
-        if (currentServerID !== serverID || lastURL !== currentURL) {
+        // Only trigger initialize when the server ID actually changes (or first visit)
+        // initialize() itself handles the "already on this server" guard, so we just
+        // need to detect a genuinely new server context.
+        if (currentServerID !== serverID) {
             debugConsole.info(`Auto-initializing for server ${serverID}`);
             lastURL = currentURL;
             
@@ -6304,6 +6480,9 @@ User Agent: ${navigator.userAgent}
             setTimeout(() => {
                 initialize();
             }, 500);
+        } else {
+            // Same server — just keep lastURL in sync (covers hash/query changes)
+            lastURL = currentURL;
         }
     };
     
